@@ -4,6 +4,101 @@
 
 这个方案更适合做数据分析、特征研究、样本分布分析和独立风险评估。相比 `cascade`，它不只关注商用阳性错误候选，而是会在所有窗口上训练和评估一个并联模型。
 
+## 新手快速上手
+
+如果你第一次接触这个项目，先按这一节跑通最小流程，再看后面的原理、特征分析和可解释性报告。
+
+### 1. 准备目录
+
+把整个 `parallel/` 文件夹拷贝到任意位置都可以运行。推荐目录关系如下：
+
+```text
+your_workspace/
+    parallel/
+        s01_model.py
+        s10_pipeline.py
+        README.md
+        ...
+    dataset/
+        sample_001.h5
+        sample_002.h5
+        ...
+```
+
+`dataset/` 不一定要放在 `parallel/` 旁边，也可以放在任意磁盘路径，运行时用 `--dataset_dir` 指向它即可。
+
+### 2. 安装 Python 依赖
+
+建议使用 Python 3.9+。在你的 Python 环境中安装：
+
+```bash
+pip install numpy pandas scipy scikit-learn xgboost h5py joblib matplotlib
+```
+
+可选安装 Graphviz，用于把树结构导出为 PNG。如果没有 Graphviz，项目仍然会输出 `tree_*.json`、`tree_*.dot` 和 `all_trees.txt`。
+
+### 3. 先做 dry-run
+
+进入 `parallel/` 目录：
+
+```bash
+cd path\to\parallel
+```
+
+先检查命令链路，不真正跑数据：
+
+```bash
+python s10_pipeline.py --dataset_dir path\to\dataset --dry_run
+```
+
+如果 dry-run 能打印 S05/S06/S07/S08/S09 的命令，说明入口脚本和参数基本正常。
+
+### 4. 跑最小完整流程
+
+推荐先用 `shadow`，因为它不会改变商用输出，只记录并联模型风险：
+
+```bash
+python s10_pipeline.py --dataset_dir path\to\dataset --guard_mode shadow
+```
+
+需要解释性图片和树结构时再加：
+
+```bash
+python s10_pipeline.py --dataset_dir path\to\dataset --guard_mode shadow --explain
+```
+
+运行结束后先看这几个文件：
+
+```text
+artifacts/parallel/commercial_model_manifest.json
+artifacts/parallel/features_train.csv
+artifacts/parallel/evaluation_report.json
+artifacts/parallel/evaluation_comparison.csv
+artifacts/parallel/feature_review/ranked_features.md
+artifacts/parallel/fusion_config.json
+```
+
+需要交给工程化同事时，导出独立部署包：
+
+```bash
+python s12_export_deploy.py --artifact_dir artifacts/parallel
+```
+
+默认会生成：
+
+```text
+artifacts/parallel/deploy_export/
+```
+
+### 5. 最重要的理解
+
+- `commercial_pred`：只依赖原商用模型的结果。
+- `parallel_pred`：商用模型旁边增加并联风险模型后的完整方案结果。
+- `features_*.csv`：并联方案的核心数据资产，保存商用输出和新增 PPG/ACC 特征。
+- `shadow`：只记录风险，不改变最终输出。
+- `fusion_config.json`：记录并联模型如何参与风险复核。
+- `commercial_model_manifest.json`：证明商用特征和模型参数没有被修改。
+
 ## 0. 先看这一节：如何理解整个项目
 
 这一节用于快速建立全局认识。后面的章节会逐个解释代码文件、参数、产物和使用方法。
@@ -42,7 +137,9 @@ flowchart TD
 
 - split 在 `S05` 之前完成。`S10` 会先生成或复用 `splits.json`，然后才提取特征。
 - 如果已经存在 `splits.json`，默认不会重新划分，所以日志中会显示复用 split。
-- `S05` 时间较长，因为它要逐样本、逐窗口提取商用输出和新增特征；当前已经增加进度输出。
+- `S05` 时间较长，因为它要逐样本、逐窗口提取商用输出和新增特征；当前已经增加进度输出，并支持按样本并行。
+- `S05` 的并行策略是保守的：默认小于 32 个样本的 split 仍串行，避免 Windows 多进程启动开销；样本数较大时自动启用最多 4 个 worker，也可以通过 `--n_workers` 显式指定。
+- `S09` 评估会优先复用 `features_{split}.csv`。如果缓存特征存在，就不再重复读取 H5 和重新抽取窗口特征；只有缓存缺失时才回退到原始 H5 评估路径。
 
 ### 0.3 商用模型和并联模型的数据流
 
@@ -538,6 +635,14 @@ parallel_pred    当前完整并联方案输出
 bypass_pred      回退模式输出，等于商用输出
 ```
 
+运行时会优先读取：
+
+```text
+artifacts/parallel/features_{split}.csv
+```
+
+这可以复用 `S05` 已经生成的窗口级特征池，避免 `S09` 再次走 H5 读取和特征抽取慢路径。如果该文件不存在，脚本仍会保留原始 H5 回退评估路径。
+
 ### `s10_pipeline.py`
 
 一键运行脚本。
@@ -574,6 +679,32 @@ artifacts/parallel/tree_export/*
 artifacts/parallel/error_trace/*
 ```
 
+### `s12_export_deploy.py`
+
+部署交接包导出脚本。它把训练产物、融合策略和部署参考脚本整理成一个可独立传递的目录：
+
+```text
+artifacts/parallel/deploy_export/
+```
+
+主要输出：
+
+```text
+model.json
+method.json
+selected_features.json
+fill_values.json
+commercial_model_manifest.json
+feature_extractor.py
+s02_features.py
+commercial_model.py
+deploy_inference.py
+README_DEPLOY.md
+deploy_manifest.json
+```
+
+`method.json` 是核心方法配置，包含特征顺序、缺失值填充值、阈值、guard 模式、并联 fusion/veto 策略和商用模型冻结信息。
+
 ## 8. 快速运行
 
 进入项目目录：
@@ -592,6 +723,18 @@ python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --dry_run
 
 ```bash
 python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --guard_mode shadow --explain
+```
+
+指定 worker 数运行。`--n_workers` 会用于首次扫描 H5 数据，也会传给 `S05` 做样本级并行：
+
+```bash
+python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --guard_mode shadow --n_workers 4
+```
+
+如果数据量较小，建议保持默认或显式使用串行，避免多进程启动开销：
+
+```bash
+python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --guard_mode shadow --n_workers 1
 ```
 
 重新生成 split：
@@ -716,6 +859,8 @@ fallback
 
 并联模型的窗口级特征池。包含商用输出、新增 PPG/ACC 特征、样本名、标签和窗口位置。
 
+这些文件不仅用于特征排序和训练，也会被 `s09_evaluate.py` 优先复用，以缩短重复评估时间。
+
 ### `feature_review/`
 
 特征排序和人工选择材料。用于解释为什么选择某些特征进入新增小模型。
@@ -770,6 +915,25 @@ fallback
 - `error_path_node_frequency.png`
 
 用于回答：错误样本是在哪些树节点、哪些分支上逃出的。
+
+### `deploy_export/`
+
+端侧或工程化交接目录。重点文件：
+
+- `model.json`：新增并联 XGBoost 模型。
+- `method.json`：完整部署方法配置，包含 fusion/veto 参数。
+- `feature_extractor.py`：部署参考特征提取脚本。
+- `s02_features.py`：兼容文件名，保证 `commercial_model.py` 内部导入可用。
+- `commercial_model.py`：冻结商用模型脚本。
+- `commercial_model_manifest.json`：商用冻结证据。
+- `deploy_inference.py`：最小 Python 推理参考。
+- `deploy_manifest.json`：文件清单和 SHA256。
+
+导出命令：
+
+```bash
+python s12_export_deploy.py --artifact_dir artifacts/parallel
+```
 
 ## 12. 推荐使用路径
 

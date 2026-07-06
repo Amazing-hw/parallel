@@ -6,6 +6,7 @@ Output: {artifact_dir}/features_{train,valid,test}.csv
 """
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import os
 import time
@@ -17,7 +18,9 @@ from s01_model import OldLivenessModel, extract_8_commercial_features, FEATURE_F
 from s01_model import commercial_model_manifest
 from s02_features import load_ppg, load_acc, get_channels_from_window, detect_green_mode
 from s02_features import is_prewindowed_signal, _downsample_ppg, _is_25hz_sample, extract_feature_pool_from_window, validate_h5_file
-from s04_data import load_splits
+from s04_data import load_splits, multiprocessing_context_from_env, resolve_n_workers
+
+MIN_AUTO_PARALLEL_SAMPLES = 32
 
 
 def _format_duration(seconds):
@@ -70,15 +73,62 @@ def _print_timing_summary(rows):
         )
 
 
-def _run_split(name, samples, model, artifact_dir):
+def _parallel_sample_worker(args):
+    idx, sample = args
+    return idx, extract_sample(sample, OldLivenessModel())
+
+
+def _resolve_s05_workers(n_workers, total):
+    if n_workers is None:
+        if total < MIN_AUTO_PARALLEL_SAMPLES:
+            return 1
+        return resolve_n_workers(None, n_items=total)
+    return resolve_n_workers(n_workers, n_items=total)
+
+
+def _iter_sample_results(name, samples, model, n_workers, split_t0):
+    total = len(samples)
+    interval = _progress_interval(total)
+    n_workers = _resolve_s05_workers(n_workers, total)
+    if n_workers <= 1 or total <= 1:
+        for i, sample in enumerate(samples, start=1):
+            yield i - 1, extract_sample(sample, model)
+            if i == 1 or i == total or i % interval == 0:
+                yield "progress", i
+        return
+
+    pool_kwargs = {"max_workers": n_workers}
+    mp_ctx = multiprocessing_context_from_env()
+    if mp_ctx is not None:
+        pool_kwargs["mp_context"] = mp_ctx
+    print(f"[{name}] parallel workers={n_workers}", flush=True)
+    ordered = [None] * total
+    done = 0
+    with ProcessPoolExecutor(**pool_kwargs) as executor:
+        futures = [
+            executor.submit(_parallel_sample_worker, (idx, sample))
+            for idx, sample in enumerate(samples)
+        ]
+        for future in as_completed(futures):
+            idx, rows = future.result()
+            ordered[idx] = rows
+            done += 1
+            if done == 1 or done == total or done % interval == 0:
+                current_rows = sum(len(part) for part in ordered if part is not None)
+                _print_progress(name, done, total, split_t0, current_rows)
+    for idx, rows in enumerate(ordered):
+        yield idx, rows or []
+
+
+def _run_split(name, samples, model, artifact_dir, n_workers=1):
     rows = []
     split_t0 = time.time()
-    interval = _progress_interval(len(samples))
     print(f"[{name}] start: {len(samples)} samples", flush=True)
-    for i, sample in enumerate(samples, start=1):
-        rows.extend(extract_sample(sample, model))
-        if i == 1 or i == len(samples) or i % interval == 0:
-            _print_progress(name, i, len(samples), split_t0, len(rows))
+    for idx, result in _iter_sample_results(name, samples, model, n_workers, split_t0):
+        if idx == "progress":
+            _print_progress(name, result, len(samples), split_t0, len(rows))
+        else:
+            rows.extend(result)
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(artifact_dir, f"features_{name}.csv"), index=False)
     elapsed = time.time() - split_t0
@@ -168,6 +218,7 @@ def main():
     p.add_argument("--artifact_dir", default="artifacts/parallel")
     p.add_argument("--splits_dir", default="artifacts")
     p.add_argument("--max_samples", type=int, default=None)
+    p.add_argument("--n_workers", type=int, default=None)
     args = p.parse_args()
 
     os.makedirs(args.artifact_dir, exist_ok=True)
@@ -178,7 +229,7 @@ def main():
     timing_rows = []
     for name in ["train", "valid", "test"]:
         samples = splits[name][:args.max_samples] if args.max_samples else splits[name]
-        timing_rows.append(_run_split(name, samples, model, args.artifact_dir))
+        timing_rows.append(_run_split(name, samples, model, args.artifact_dir, args.n_workers))
     total_elapsed = time.time() - t0
     timing_rows.append({
         "split": "total",

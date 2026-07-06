@@ -46,7 +46,11 @@ def eval_fusion(df, col, thr=0.5):
 
 
 def build_feature_matrix(df, features, fills):
-    X = np.array([[row.get(feature, 0.0) for feature in features] for _, row in df.iterrows()], dtype=float)
+    if not features:
+        return np.empty((len(df), 0), dtype=float)
+    matrix = df.reindex(columns=features)
+    matrix = matrix.apply(pd.to_numeric, errors="coerce")
+    X = matrix.to_numpy(dtype=float)
     for i, feature in enumerate(features):
         invalid = ~np.isfinite(X[:, i])
         X[invalid, i] = fills.get(feature, 0.0)

@@ -661,6 +661,19 @@ def clean_features_by_train(df_train, df_valid, feature_cols, missing_thresh=0.3
         corr = df_train[kept2].corr().abs()
         upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
         to_remove = set()
+
+        def safe_abs_corr(values, target):
+            values = np.asarray(values, dtype=float)
+            target = np.asarray(target, dtype=float)
+            mask = np.isfinite(values) & np.isfinite(target)
+            if np.sum(mask) < 2:
+                return 0.0
+            values, target = values[mask], target[mask]
+            if np.var(values) <= 0.0 or np.var(target) <= 0.0:
+                return 0.0
+            corr_value = np.corrcoef(values, target)[0, 1]
+            return float(abs(corr_value)) if np.isfinite(corr_value) else 0.0
+
         for col_i in upper.columns:
             high_corr_with = [col_j for col_j in upper.index if upper.at[col_j, col_i] > corr_thresh]
             if not high_corr_with:
@@ -672,8 +685,8 @@ def clean_features_by_train(df_train, df_valid, feature_cols, missing_thresh=0.3
                 # 用中位数填充可能的 NaN 再算 target corr
                 vi = df_train[col_i].fillna(df_train[col_i].median()).values
                 vj = df_train[col_j].fillna(df_train[col_j].median()).values
-                corr_i = abs(np.corrcoef(vi, y)[0, 1]) if np.isfinite(np.var(vi)) else 0.0
-                corr_j = abs(np.corrcoef(vj, y)[0, 1]) if np.isfinite(np.var(vj)) else 0.0
+                corr_i = safe_abs_corr(vi, y)
+                corr_j = safe_abs_corr(vj, y)
                 if corr_i >= corr_j:
                     to_remove.add(col_j)
                 else:

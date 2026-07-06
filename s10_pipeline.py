@@ -158,6 +158,8 @@ def main():
     extract_args = ["--splits_dir", paths["splits_dir"], "--artifact_dir", paths["artifact_dir"]]
     if args.max_samples:
         extract_args += ["--max_samples", str(args.max_samples)]
+    if args.n_workers is not None:
+        extract_args += ["--n_workers", str(args.n_workers)]
     train_args = ["--artifact_dir", paths["artifact_dir"], "--n_estimators", str(args.n_estimators), "--max_depth", str(args.max_depth)]
     if args.manual_features:
         train_args += ["--manual_features", _abs_path(args.manual_features, d)]

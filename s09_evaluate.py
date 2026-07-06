@@ -47,6 +47,24 @@ def predict_new(new_feats, bundle):
     return float(bundle["model"].predict_proba(X)[0, 1])
 
 
+def build_feature_matrix(df, features, fills):
+    if not features:
+        return np.empty((len(df), 0), dtype=float)
+    matrix = df.reindex(columns=features)
+    matrix = matrix.apply(pd.to_numeric, errors="coerce")
+    X = matrix.to_numpy(dtype=float)
+    for i, feature in enumerate(features):
+        invalid = ~np.isfinite(X[:, i])
+        X[invalid, i] = fills.get(feature, 0.0)
+    return X
+
+
+def predict_new_many(df, bundle):
+    feats, fills = bundle["selected_features"], bundle["fill_values"]
+    X = build_feature_matrix(df, feats, fills)
+    return np.asarray(bundle["model"].predict_proba(X)[:, 1], dtype=float)
+
+
 def fuse_veto(P_c, P_n, hi=0.80, lo=0.20):
     P_c, P_n = np.asarray(P_c, float), np.asarray(P_n, float)
     r = P_c.copy(); r[(P_c >= 0.5) & (P_n < lo)] = P_n[(P_c >= 0.5) & (P_n < lo)]
@@ -127,6 +145,61 @@ def apply_guard_decision(commercial_pred, veto_risks, guard_mode="shadow", veto_
     )["final_pred"]
 
 
+def _normal_window_mask(df):
+    if "fallback" not in df.columns:
+        return pd.Series(True, index=df.index)
+    raw = df["fallback"].fillna(False)
+    if raw.dtype == bool:
+        return ~raw
+    text = raw.astype(str).str.strip().str.lower()
+    return ~text.isin(["1", "true", "yes", "y"])
+
+
+def evaluate_cached_feature_rows(
+    df,
+    bundle,
+    fcfg,
+    guard_mode="shadow",
+    min_veto_windows=2,
+    min_veto_ratio=0.4,
+):
+    if len(df) == 0:
+        return []
+    if fcfg.get("chosen_strategy") != "veto":
+        raise ValueError(f"unsupported commercial guard strategy: {fcfg.get('chosen_strategy')}")
+
+    vp = fcfg.get("veto_params", {})
+    p_c_high, p_n_low = float(vp.get("p_c_high", 0.8)), float(vp.get("p_n_low", 0.2))
+    work = df.copy()
+    work["P_c"] = work["commercial_score"].apply(score_to_prob)
+    work["P_n"] = predict_new_many(work, bundle)
+
+    results = []
+    for sn, group in work.groupby("sample_name"):
+        target = int(pd.to_numeric(group["target"], errors="coerce").dropna().iloc[0])
+        normal = group[_normal_window_mask(group)]
+        if len(normal) == 0:
+            results.append({"sample_name": sn, "target": target, "commercial_pred": 0,
+                            "parallel_pred": 0, "bypass_pred": 0, "fallback": True})
+            continue
+        Pca, Pna = normal["P_c"].to_numpy(float), normal["P_n"].to_numpy(float)
+        com_pred = int(np.mean(Pca) >= 0.5)
+        Pf = fuse_veto(Pca, Pna, p_c_high, p_n_low)
+        risk_series = 1.0 - Pna if com_pred else [0.0]
+        decision = make_guard_decision(
+            com_pred, risk_series, guard_mode=guard_mode, veto_threshold=1.0 - p_n_low,
+            min_veto_windows=min_veto_windows, min_veto_ratio=min_veto_ratio
+        )
+        results.append({"sample_name": sn, "target": target, "commercial_pred": com_pred,
+                        "parallel_pred": decision["final_pred"], "bypass_pred": com_pred,
+                        "parallel_mean_prob": float(np.mean(Pf)), "veto_risk": decision["veto_risk"],
+                        "risk_count": decision["risk_count"], "window_count": decision["window_count"],
+                        "risk_ratio": decision["risk_ratio"], "guard_action": decision["guard_action"],
+                        "decision_source": decision["decision_source"],
+                        "guard_mode": guard_mode, "fallback": False})
+    return results
+
+
 def main():
     p = argparse.ArgumentParser(); p.add_argument("--artifact_dir", default="artifacts/parallel")
     p.add_argument("--splits_dir", default="artifacts"); p.add_argument("--split", default="test")
@@ -135,66 +208,75 @@ def main():
     p.add_argument("--min_veto_ratio", type=float, default=0.4)
     args = p.parse_args()
     os.makedirs(args.artifact_dir, exist_ok=True)
-    splits = load_splits(args.splits_dir); samples = splits[args.split]
     bundle = joblib.load(os.path.join(args.artifact_dir, "new_model_bundle.pkl"))
     with open(os.path.join(args.artifact_dir, "fusion_config.json")) as f: fcfg = json.load(f)
     strat = fcfg["chosen_strategy"]; vp = fcfg.get("veto_params", {})
-    com = OldLivenessModel(); t0 = time.time(); results = []
-    for sample in samples:
-        sn, target = sample.get("sample_name", "unknown"), int(sample.get("target", 0))
-        try:
-            ppg, acc = load_ppg(sample), load_acc(sample)
-            ok, err = validate_h5_file(sample["h5_file"], sn)
-            if not ok: raise ValueError(err)
-        except Exception:
-            results.append({"sample_name": sn, "target": target, "commercial_pred": 0,
-                            "parallel_pred": 0, "bypass_pred": 0, "fallback": True}); continue
-        Pc, Pn = [], []
-        if is_prewindowed_signal(ppg):
-            mode = detect_green_mode(ppg)
-            for idx in range(3, ppg.shape[0]):
-                win25, _ = _prewindow_to_25hz(sample, ppg[idx], COMMERCIAL_WIN_SEC)
-                try:
-                    ir, amb, g1, g2, g3 = get_channels_from_window(win25, mode)
-                    acc_seg = None
-                    if acc is not None and is_prewindowed_signal(acc) and idx < acc.shape[0]:
-                        acc_seg, _ = _prewindow_to_25hz(sample, acc[idx], COMMERCIAL_WIN_SEC)
-                    _, score, _, _ = com.predict_raw(extract_8_commercial_features(ir, amb, g1, g2, g3, acc_seg))
-                    Pc.append(score_to_prob(score))
-                    Pn.append(predict_new(extract_feature_pool_from_window(ir, amb, g1, g2, g3, fs=FEATURE_FS), bundle))
-                except Exception: Pc.append(0.0); Pn.append(0.5)
-        else:
-            ppg25, acc25, _ = _to_25hz(sample, ppg, acc); mode = detect_green_mode(ppg)
-            sw, ss = int(round(COMMERCIAL_WIN_SEC * FEATURE_FS)), int(round(COMMERCIAL_STRIDE_SEC * FEATURE_FS))
-            for step in range(3, max(0, (len(ppg25) - sw) // ss + 1)):
-                win = ppg25[step * ss:step * ss + sw, :]
-                try:
-                    ir, amb, g1, g2, g3 = get_channels_from_window(win, mode)
-                    _, score, _, _ = com.predict_raw(extract_8_commercial_features(ir, amb, g1, g2, g3, None))
-                    Pc.append(score_to_prob(score))
-                    Pn.append(predict_new(extract_feature_pool_from_window(ir, amb, g1, g2, g3, fs=FEATURE_FS), bundle))
-                except Exception: Pc.append(0.0); Pn.append(0.5)
-        if not Pc:
-            results.append({"sample_name": sn, "target": target, "commercial_pred": 0,
-                            "parallel_pred": 0, "bypass_pred": 0, "fallback": True}); continue
-        Pca, Pna = np.array(Pc), np.array(Pn)
-        com_pred = int(np.mean(Pca) >= 0.5)
-        if strat != "veto":
-            raise ValueError(f"unsupported commercial guard strategy: {strat}")
-        Pf = fuse_veto(Pca, Pna, vp.get("p_c_high", 0.8), vp.get("p_n_low", 0.2))
-        risk_series = 1.0 - Pna if com_pred else [0.0]
-        decision = make_guard_decision(
-            com_pred, risk_series, guard_mode=args.guard_mode, veto_threshold=1.0 - float(vp.get("p_n_low", 0.2)),
+    t0 = time.time(); results = []
+    feature_path = os.path.join(args.artifact_dir, f"features_{args.split}.csv")
+    if os.path.exists(feature_path):
+        print(f"Using cached features: {feature_path}")
+        results = evaluate_cached_feature_rows(
+            pd.read_csv(feature_path), bundle, fcfg, guard_mode=args.guard_mode,
             min_veto_windows=args.min_veto_windows, min_veto_ratio=args.min_veto_ratio
         )
-        par_pred = decision["final_pred"]
-        results.append({"sample_name": sn, "target": target, "commercial_pred": com_pred,
-                        "parallel_pred": par_pred, "bypass_pred": com_pred,
-                        "parallel_mean_prob": float(np.mean(Pf)), "veto_risk": decision["veto_risk"],
-                        "risk_count": decision["risk_count"], "window_count": decision["window_count"],
-                        "risk_ratio": decision["risk_ratio"], "guard_action": decision["guard_action"],
-                        "decision_source": decision["decision_source"],
-                        "guard_mode": args.guard_mode, "fallback": False})
+    else:
+        splits = load_splits(args.splits_dir); samples = splits[args.split]
+        com = OldLivenessModel()
+        for sample in samples:
+            sn, target = sample.get("sample_name", "unknown"), int(sample.get("target", 0))
+            try:
+                ppg, acc = load_ppg(sample), load_acc(sample)
+                ok, err = validate_h5_file(sample["h5_file"], sn)
+                if not ok: raise ValueError(err)
+            except Exception:
+                results.append({"sample_name": sn, "target": target, "commercial_pred": 0,
+                                "parallel_pred": 0, "bypass_pred": 0, "fallback": True}); continue
+            Pc, Pn = [], []
+            if is_prewindowed_signal(ppg):
+                mode = detect_green_mode(ppg)
+                for idx in range(3, ppg.shape[0]):
+                    win25, _ = _prewindow_to_25hz(sample, ppg[idx], COMMERCIAL_WIN_SEC)
+                    try:
+                        ir, amb, g1, g2, g3 = get_channels_from_window(win25, mode)
+                        acc_seg = None
+                        if acc is not None and is_prewindowed_signal(acc) and idx < acc.shape[0]:
+                            acc_seg, _ = _prewindow_to_25hz(sample, acc[idx], COMMERCIAL_WIN_SEC)
+                        _, score, _, _ = com.predict_raw(extract_8_commercial_features(ir, amb, g1, g2, g3, acc_seg))
+                        Pc.append(score_to_prob(score))
+                        Pn.append(predict_new(extract_feature_pool_from_window(ir, amb, g1, g2, g3, fs=FEATURE_FS), bundle))
+                    except Exception: Pc.append(0.0); Pn.append(0.5)
+            else:
+                ppg25, acc25, _ = _to_25hz(sample, ppg, acc); mode = detect_green_mode(ppg)
+                sw, ss = int(round(COMMERCIAL_WIN_SEC * FEATURE_FS)), int(round(COMMERCIAL_STRIDE_SEC * FEATURE_FS))
+                for step in range(3, max(0, (len(ppg25) - sw) // ss + 1)):
+                    win = ppg25[step * ss:step * ss + sw, :]
+                    try:
+                        ir, amb, g1, g2, g3 = get_channels_from_window(win, mode)
+                        _, score, _, _ = com.predict_raw(extract_8_commercial_features(ir, amb, g1, g2, g3, None))
+                        Pc.append(score_to_prob(score))
+                        Pn.append(predict_new(extract_feature_pool_from_window(ir, amb, g1, g2, g3, fs=FEATURE_FS), bundle))
+                    except Exception: Pc.append(0.0); Pn.append(0.5)
+            if not Pc:
+                results.append({"sample_name": sn, "target": target, "commercial_pred": 0,
+                                "parallel_pred": 0, "bypass_pred": 0, "fallback": True}); continue
+            Pca, Pna = np.array(Pc), np.array(Pn)
+            com_pred = int(np.mean(Pca) >= 0.5)
+            if strat != "veto":
+                raise ValueError(f"unsupported commercial guard strategy: {strat}")
+            Pf = fuse_veto(Pca, Pna, vp.get("p_c_high", 0.8), vp.get("p_n_low", 0.2))
+            risk_series = 1.0 - Pna if com_pred else [0.0]
+            decision = make_guard_decision(
+                com_pred, risk_series, guard_mode=args.guard_mode, veto_threshold=1.0 - float(vp.get("p_n_low", 0.2)),
+                min_veto_windows=args.min_veto_windows, min_veto_ratio=args.min_veto_ratio
+            )
+            par_pred = decision["final_pred"]
+            results.append({"sample_name": sn, "target": target, "commercial_pred": com_pred,
+                            "parallel_pred": par_pred, "bypass_pred": com_pred,
+                            "parallel_mean_prob": float(np.mean(Pf)), "veto_risk": decision["veto_risk"],
+                            "risk_count": decision["risk_count"], "window_count": decision["window_count"],
+                            "risk_ratio": decision["risk_ratio"], "guard_action": decision["guard_action"],
+                            "decision_source": decision["decision_source"],
+                            "guard_mode": args.guard_mode, "fallback": False})
     print(f"Inference ({time.time()-t0:.1f}s)")
     cm = metric([r["target"] for r in results], [r["commercial_pred"] for r in results])
     pm = metric([r["target"] for r in results], [r["parallel_pred"] for r in results])
