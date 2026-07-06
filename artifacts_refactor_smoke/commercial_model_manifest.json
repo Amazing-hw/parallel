@@ -1,0 +1,32 @@
+{
+  "model_name": "frozen_commercial_adaboost",
+  "feature_names": [
+    "green_corr",
+    "green_ac",
+    "amb_ac",
+    "acc_ysum",
+    "green_dc",
+    "amb_dc",
+    "green_xcorr",
+    "fft_peak_med"
+  ],
+  "tree_num": 18,
+  "tree_node": 29,
+  "detect_tree_threshold": -1000,
+  "good_corr_threshold": 8000,
+  "good_corr_threshold_sleep": 6000,
+  "good_ac_threshold": 1000,
+  "min_ac_threshold": 10,
+  "live_flag_delay": 5,
+  "un_live_flag_delay": 5,
+  "feature_fs": 25,
+  "commercial_win_sec": 5,
+  "commercial_stride_sec": 1,
+  "stage1_primitive_sec": 1.0,
+  "stage1_decision_sec": 3.0,
+  "stage1_fs": 5,
+  "stage1_gate_k": 3,
+  "tree_index_sha256": "921a25c0cf8ca2cdb3b8dd2ecb58bcabbb3c6702b631f23dd3f4fe37b0ddf1ce",
+  "tree_value_sha256": "0032848ae66e6f7324999b35963d1d305c729e7a80e5d260ab1db43f6c8cf456",
+  "frozen": true
+}

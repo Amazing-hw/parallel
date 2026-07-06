@@ -264,6 +264,127 @@ def write_comparison_outputs(report, out_dir):
     return {"comparison_figure": fig_paths, "source_data": source_path}
 
 
+def write_project_overview_figure(report, out_dir):
+    fig_dir = os.path.join(out_dir, "figures")
+    os.makedirs(fig_dir, exist_ok=True)
+    commercial_fp = int(report.get("commercial", {}).get("confusion", {}).get("FP", 0))
+    guard_fp = int(report.get("guard", {}).get("confusion", {}).get("FP", 0))
+    source = pd.DataFrame([
+        {"item": "evaluated samples", "value": int(report.get("n", 0))},
+        {"item": "commercial false wearing", "value": commercial_fp},
+        {"item": "guard false wearing", "value": guard_fp},
+        {"item": "fixed samples", "value": int(report.get("fixed_count", 0))},
+        {"item": "broken samples", "value": int(report.get("broken_count", 0))},
+    ])
+    source_path = os.path.join(fig_dir, "project_overview_source.csv")
+    source.to_csv(source_path, index=False)
+    apply_publication_style()
+    fig, axes = plt.subplots(1, 2, figsize=(6.4, 2.6), gridspec_kw={"width_ratios": [1.25, 1.0]})
+    ax = axes[0]
+    ax.axis("off")
+    nodes = [
+        (0.05, 0.70, "Frozen\ncommercial model", PALETTE["commercial"]),
+        (0.42, 0.70, "Parallel\nrisk model", PALETTE["guard"]),
+        (0.78, 0.70, "Fusion / guard\noutput", "#DDE8DE"),
+        (0.42, 0.25, "Bypass\nreturn path", "#F0F0F0"),
+    ]
+    for x, y, label, color in nodes:
+        ax.add_patch(plt.Rectangle((x, y), 0.22, 0.16, facecolor=color, edgecolor="#303030", lw=0.7))
+        ax.text(x + 0.11, y + 0.08, label, ha="center", va="center", fontsize=7)
+    for start, end in [((0.27, 0.78), (0.42, 0.78)), ((0.64, 0.78), (0.78, 0.78)), ((0.53, 0.70), (0.53, 0.41)), ((0.42, 0.33), (0.27, 0.70))]:
+        ax.annotate("", xy=end, xytext=start, arrowprops=dict(arrowstyle="->", lw=0.8, color="#303030"))
+    ax.set_title("Deployment logic")
+    ax2 = axes[1]
+    bars = pd.DataFrame([
+        {"label": "Commercial FP", "value": commercial_fp, "color": PALETTE["delta_down"]},
+        {"label": "Guard FP", "value": guard_fp, "color": PALETTE["guard"]},
+        {"label": "Fixed", "value": int(report.get("fixed_count", 0)), "color": PALETTE["delta_up"]},
+        {"label": "Broken", "value": int(report.get("broken_count", 0)), "color": "#B8B8B8"},
+    ])
+    ax2.barh(bars["label"][::-1], bars["value"][::-1], color=bars["color"][::-1], edgecolor="black", linewidth=0.4)
+    ax2.set_xlabel("Samples")
+    ax2.set_title("Outcome summary")
+    ax2.grid(axis="x", color="#D8D8D8", lw=0.5)
+    fig_paths = save_publication_figure(fig, os.path.join(fig_dir, "project_overview"))
+    return {"figure": fig_paths, "source_data": source_path}
+
+
+def write_top_risky_samples_figure(rows, out_dir, pred_col=PRED_COL, top_n=15):
+    df = _with_error_type(_as_dataframe(rows), pred_col)
+    fig_dir = os.path.join(out_dir, "figures")
+    os.makedirs(fig_dir, exist_ok=True)
+    if df.empty:
+        source = pd.DataFrame(columns=["sample_name", "target", "commercial_pred", pred_col, "veto_risk", "risk_ratio", "error_type"])
+    else:
+        source = df.sort_values(["veto_risk", "risk_ratio"], ascending=False).head(int(top_n)).copy()
+        keep = [c for c in ["sample_name", "target", "commercial_pred", pred_col, "veto_risk", "risk_ratio", "guard_action", "error_type"] if c in source.columns]
+        source = source[keep]
+    source_path = os.path.join(fig_dir, "top_risky_samples_source.csv")
+    source.to_csv(source_path, index=False)
+    apply_publication_style()
+    fig_h = max(2.2, 0.28 * max(1, len(source)) + 0.8)
+    fig, ax = plt.subplots(figsize=(4.6, fig_h))
+    if source.empty:
+        ax.text(0.5, 0.5, "No evaluated samples", ha="center", va="center")
+        ax.axis("off")
+    else:
+        plot_df = source.iloc[::-1].copy()
+        labels = plot_df["sample_name"].astype(str)
+        colors = plot_df["error_type"].map({"false_wearing": PALETTE["delta_down"], "false_reject": PALETTE["commercial"], "correct": "#B8B8B8"}).fillna("#B8B8B8")
+        ax.barh(labels, plot_df["veto_risk"].astype(float), color=colors, edgecolor="black", linewidth=0.4)
+        ax.set_xlim(0, 1.02)
+        ax.set_xlabel("Guard risk")
+        ax.set_title("Top risky samples")
+        ax.grid(axis="x", color="#D8D8D8", lw=0.5)
+    fig_paths = save_publication_figure(fig, os.path.join(fig_dir, "top_risky_samples"))
+    return {"figure": fig_paths, "source_data": source_path}
+
+
+def write_feature_ranking_figure(out_dir, top_n=15):
+    fig_dir = os.path.join(out_dir, "figures")
+    os.makedirs(fig_dir, exist_ok=True)
+    candidates = [
+        os.path.join(out_dir, "feature_review", "ranked_features.csv"),
+        os.path.join(out_dir, "ranked_features.csv"),
+    ]
+    path = next((p for p in candidates if os.path.exists(p)), None)
+    if path is None:
+        source = pd.DataFrame(columns=["feature", "score", "group"])
+    else:
+        try:
+            ranked = pd.read_csv(path)
+        except pd.errors.EmptyDataError:
+            ranked = pd.DataFrame()
+        score_col = next((c for c in ["combined_score", "score", "importance", "train_auc", "valid_auc"] if c in ranked.columns), None)
+        if score_col is None:
+            numeric = [c for c in ranked.columns if c != "feature" and pd.api.types.is_numeric_dtype(ranked[c])]
+            score_col = numeric[0] if numeric else None
+        if score_col is None or "feature" not in ranked.columns:
+            source = pd.DataFrame(columns=["feature", "score", "group"])
+        else:
+            source = ranked.copy()
+            source["score"] = pd.to_numeric(source[score_col], errors="coerce").fillna(0.0)
+            if "group" not in source.columns:
+                source["group"] = "feature"
+            source = source.sort_values("score", ascending=False).head(int(top_n))[["feature", "score", "group"]]
+    source_path = os.path.join(fig_dir, "feature_ranking_topk_source.csv")
+    source.to_csv(source_path, index=False)
+    apply_publication_style()
+    fig_h = max(2.4, 0.27 * max(1, len(source)) + 0.8)
+    fig, ax = plt.subplots(figsize=(4.2, fig_h))
+    if source.empty:
+        ax.text(0.5, 0.5, "No ranked features", ha="center", va="center")
+        ax.axis("off")
+    else:
+        plot_df = source.iloc[::-1]
+        ax.barh(plot_df["feature"], plot_df["score"], color=PALETTE["commercial"], edgecolor="black", linewidth=0.4)
+        ax.set_xlabel("Ranking score")
+        ax.set_title("Top ranked features")
+        ax.grid(axis="x", color="#D8D8D8", lw=0.5)
+    fig_paths = save_publication_figure(fig, os.path.join(fig_dir, "feature_ranking_topk"))
+    return {"figure": fig_paths, "source_data": source_path}
+
+
 def write_error_path_summary_figure(rows, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     df = pd.DataFrame(rows)
@@ -430,8 +551,11 @@ def main():
     feature_df = pd.read_csv(feature_path) if os.path.exists(feature_path) else pd.DataFrame()
     report = build_comparison_report(eval_df, guard_pred_col=PRED_COL)
     write_comparison_outputs(report, args.artifact_dir)
+    write_project_overview_figure(report, args.artifact_dir)
     write_sample_flow_funnel(eval_df, args.artifact_dir, pred_col=PRED_COL)
     write_error_distribution_figures(eval_df, args.artifact_dir, pred_col=PRED_COL)
+    write_top_risky_samples_figure(eval_df, args.artifact_dir, pred_col=PRED_COL)
+    write_feature_ranking_figure(args.artifact_dir)
     export_trees(model, os.path.join(args.artifact_dir, "tree_export"))
     error_rows = export_error_paths(model, features, eval_df, feature_df, PRED_COL, os.path.join(args.artifact_dir, "error_trace"))
     write_error_escape_rules(error_rows, os.path.join(args.artifact_dir, "error_trace"))

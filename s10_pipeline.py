@@ -16,6 +16,7 @@ from s04_data import save_splits, scan_h5_samples, split_samples, summarize_spli
 
 
 PROJECT_NAME = "parallel"
+DRY_RUN_PATH_KEYS = ("base_dir", "dataset_dir", "splits_dir", "artifact_dir")
 
 
 def _abs_path(path, base_dir):
@@ -32,6 +33,11 @@ def resolve_pipeline_paths(splits_dir=None, artifact_dir=None, dataset_dir="data
     artifact_dir = _abs_path(artifact_dir, base_dir) if artifact_dir else os.path.join(base_dir, "artifacts", PROJECT_NAME)
     dataset_dir = _abs_path(dataset_dir, base_dir)
     return {"base_dir": base_dir, "splits_dir": splits_dir, "artifact_dir": artifact_dir, "dataset_dir": dataset_dir}
+
+
+def print_dry_run_paths(paths):
+    for key in DRY_RUN_PATH_KEYS:
+        print(f"[DRY RUN] {key}={paths[key]}")
 
 
 def ensure_splits(splits_dir, dataset_dir, valid_size=0.15, test_size=0.15, random_state=42, n_workers=None, force_split=False):
@@ -52,16 +58,59 @@ def ensure_splits(splits_dir, dataset_dir, valid_size=0.15, test_size=0.15, rand
     return {"created": True, "path": splits_path}
 
 
+def format_duration(seconds):
+    seconds = max(0, int(round(float(seconds))))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h:d}h{m:02d}m{s:02d}s"
+    if m:
+        return f"{m:d}m{s:02d}s"
+    return f"{s:d}s"
+
+
+def print_timing_summary(records, total_elapsed, pipeline_status):
+    print("\n" + "=" * 60)
+    print(f"  Pipeline timing summary (status={pipeline_status}, total={total_elapsed:.1f}s / {format_duration(total_elapsed)})")
+    print("=" * 60)
+    for i, record in enumerate(records, start=1):
+        elapsed = float(record.get("elapsed_sec", 0.0))
+        status = record.get("status", "unknown")
+        detail = record.get("detail")
+        suffix = f" [{detail}]" if detail else ""
+        print(f"  {i:02d}. {record.get('step', 'unknown'):<24} {elapsed:8.1f}s  {format_duration(elapsed):>9}  {status}{suffix}")
+
+
 def run(script, args_list, desc, cwd):
     print(f"\n{'='*60}\n  {desc}\n{'='*60}")
     cmd = [sys.executable, script] + args_list
     print(f"  {subprocess.list2cmdline(cmd)}")
     t0 = time.time()
     rc = subprocess.run(cmd, cwd=cwd).returncode
-    if rc != 0:
-        print(f"\n[FAILED] {desc}")
-        sys.exit(rc)
-    print(f"  Done ({time.time()-t0:.1f}s)")
+    elapsed = time.time() - t0
+    if rc == 0:
+        print(f"  Done ({elapsed:.1f}s / {format_duration(elapsed)})")
+    else:
+        print(f"\n[FAILED] {desc} ({elapsed:.1f}s / {format_duration(elapsed)})")
+    return {
+        "step": desc,
+        "status": "success" if rc == 0 else "failed",
+        "elapsed_sec": round(elapsed, 3),
+        "return_code": int(rc),
+        "command": subprocess.list2cmdline(cmd),
+    }
+
+
+def split_timing_record(elapsed, split_result):
+    return {
+        "step": "S04-Split data",
+        "status": "success",
+        "elapsed_sec": round(elapsed, 3),
+        "return_code": 0,
+        "command": "internal ensure_splits",
+        "detail": "created" if split_result.get("created") else "reused",
+        "output": split_result.get("path"),
+    }
 
 
 def main():
@@ -91,17 +140,20 @@ def main():
 
     paths = resolve_pipeline_paths(args.splits_dir, args.artifact_dir, args.dataset_dir, d)
     if args.dry_run:
-        print(f"[DRY RUN] base_dir={paths['base_dir']}")
-        print(f"[DRY RUN] dataset_dir={paths['dataset_dir']}")
-        print(f"[DRY RUN] splits_dir={paths['splits_dir']}")
-        print(f"[DRY RUN] artifact_dir={paths['artifact_dir']}")
-    else:
-        ensure_splits(
+        print_dry_run_paths(paths)
+    timing_records = []
+    pipeline_t0 = time.time()
+    if not args.dry_run:
+        split_t0 = time.time()
+        split_result = ensure_splits(
             paths["splits_dir"], paths["dataset_dir"],
             valid_size=args.valid_size, test_size=args.test_size,
             random_state=args.random_state, n_workers=args.n_workers,
             force_split=args.force_split,
         )
+        split_elapsed = time.time() - split_t0
+        timing_records.append(split_timing_record(split_elapsed, split_result))
+        print(f"[TIMING] S04-Split data: {split_elapsed:.1f}s / {format_duration(split_elapsed)}")
 
     extract_args = ["--splits_dir", paths["splits_dir"], "--artifact_dir", paths["artifact_dir"]]
     if args.max_samples:
@@ -122,13 +174,20 @@ def main():
     if args.explain:
         steps.append(("S11-Explain", os.path.join(d, "s11_explain.py"), ["--artifact_dir", paths["artifact_dir"], "--split", args.eval_split]))
 
-    t0 = time.time()
     for desc, script, step_args in steps:
         if args.dry_run:
             print(f"[DRY RUN] {script} {' '.join(step_args)}")
         else:
-            run(script, step_args, desc, d)
-    print(f"\n{'='*60}\n  Parallel done ({time.time()-t0:.1f}s)\n{'='*60}")
+            record = run(script, step_args, desc, d)
+            timing_records.append(record)
+            if record["return_code"] != 0:
+                total_elapsed = time.time() - pipeline_t0
+                print_timing_summary(timing_records, total_elapsed, "failed")
+                sys.exit(record["return_code"])
+    total_elapsed = time.time() - pipeline_t0
+    if not args.dry_run:
+        print_timing_summary(timing_records, total_elapsed, "success")
+    print(f"\n{'='*60}\n  Parallel done ({total_elapsed:.1f}s / {format_duration(total_elapsed)})\n{'='*60}")
 
 
 if __name__ == "__main__":

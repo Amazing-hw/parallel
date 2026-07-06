@@ -1,0 +1,37 @@
+{
+  "stage": "S05-Extract features",
+  "splits": [
+    {
+      "split": "train",
+      "samples": 16,
+      "rows": 112,
+      "elapsed_sec": 4.618,
+      "samples_per_sec": 3.464581,
+      "rows_per_sec": 24.252066
+    },
+    {
+      "split": "valid",
+      "samples": 4,
+      "rows": 28,
+      "elapsed_sec": 1.162,
+      "samples_per_sec": 3.442616,
+      "rows_per_sec": 24.098315
+    },
+    {
+      "split": "test",
+      "samples": 4,
+      "rows": 28,
+      "elapsed_sec": 1.156,
+      "samples_per_sec": 3.461632,
+      "rows_per_sec": 24.231426
+    },
+    {
+      "split": "total",
+      "samples": 24,
+      "rows": 168,
+      "elapsed_sec": 6.936,
+      "samples_per_sec": 3.460079,
+      "rows_per_sec": 24.22055
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+sample_name,target,commercial_pred,parallel_pred,veto_risk,risk_ratio,guard_action,error_type
+s_0012,0,1,1,0.5007815062999725,0.0,pass,false_wearing
+s_0006,0,1,1,0.5007815062999725,0.0,pass,false_wearing
+s_0023,1,0,0,0.0,0.0,pass,false_reject
+s_0015,1,0,0,0.0,0.0,pass,false_reject

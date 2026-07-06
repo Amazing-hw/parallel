@@ -797,7 +797,12 @@ def _median_filter_np(x, kernel_size):
     half = k // 2
     n = len(x)
     out = np.empty(n, dtype=x.dtype)
-    for i in range(n):
+    if n == 0:
+        return out
+    if n >= k:
+        windows = np.lib.stride_tricks.sliding_window_view(x, k)
+        out[half:n - half] = np.median(windows, axis=1)
+    for i in list(range(0, min(half, n))) + list(range(max(half, n - half), n)):
         lo = max(0, i - half)
         hi = min(n, i + half + 1)
         out[i] = np.median(x[lo:hi])

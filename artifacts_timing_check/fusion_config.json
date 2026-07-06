@@ -1,0 +1,50 @@
+{
+  "best_strategy": "veto",
+  "chosen_strategy": "veto",
+  "strategies": {
+    "commercial": {
+      "n": 4,
+      "accuracy": 0.5,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "confusion": {
+        "TN": 2,
+        "FP": 0,
+        "FN": 2,
+        "TP": 0
+      }
+    },
+    "new_model": {
+      "n": 4,
+      "accuracy": 0.5,
+      "precision": 0.5,
+      "recall": 1.0,
+      "f1": 0.6666666666666666,
+      "confusion": {
+        "TN": 0,
+        "FP": 2,
+        "FN": 0,
+        "TP": 2
+      }
+    },
+    "veto": {
+      "n": 4,
+      "accuracy": 0.5,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "confusion": {
+        "TN": 2,
+        "FP": 0,
+        "FN": 2,
+        "TP": 0
+      }
+    }
+  },
+  "veto_params": {
+    "p_c_high": 0.8,
+    "p_n_low": 0.2
+  },
+  "new_model_threshold": 0.05
+}

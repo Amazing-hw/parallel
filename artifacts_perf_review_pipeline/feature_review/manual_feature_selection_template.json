@@ -1,0 +1,7 @@
+{
+  "selected_features": [
+    "GTOP2_zero_cross_rate"
+  ],
+  "excluded_features": {},
+  "notes": "Edit selected_features, save as manual_feature_selection.json, then pass --manual_features to training."
+}

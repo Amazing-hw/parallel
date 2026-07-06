@@ -1,0 +1,16 @@
+[
+  {
+    "rank": 1,
+    "feature": "GTOP2_zero_cross_rate",
+    "group": "waveform_morphology",
+    "auc_train": 1.0,
+    "auc_valid": 1.0,
+    "stability_score": 1.0,
+    "missing_rate": 0.0,
+    "freq": 1.0,
+    "avg_importance": 0.0,
+    "combined_score": 0.0,
+    "selected_auto": true,
+    "recommendation": "keep"
+  }
+]

@@ -1,0 +1,64 @@
+{
+  "project": "parallel",
+  "pipeline_status": "success",
+  "total_elapsed_sec": 23.743,
+  "total_elapsed_human": "24s",
+  "steps": [
+    {
+      "step": "S04-Split data",
+      "status": "success",
+      "elapsed_sec": 0.0,
+      "return_code": 0,
+      "command": "internal ensure_splits",
+      "detail": "reused",
+      "output": "D:\\wearing_liveness\\new\\new_codex_1\\parallel\\artifacts_deploy_check_20260705\\splits.json",
+      "order": 1,
+      "elapsed_human": "0s"
+    },
+    {
+      "step": "S05-Extract",
+      "status": "success",
+      "elapsed_sec": 8.511,
+      "return_code": 0,
+      "command": "E:\\software\\anaconda\\anaconda\\python.exe D:\\wearing_liveness\\new\\new_codex_1\\parallel\\s05_extract_features.py --splits_dir D:\\wearing_liveness\\new\\new_codex_1\\parallel\\artifacts_deploy_check_20260705 --artifact_dir D:\\wearing_liveness\\new\\new_codex_1\\parallel\\artifacts_timing_check",
+      "order": 2,
+      "elapsed_human": "9s"
+    },
+    {
+      "step": "S06-Select",
+      "status": "success",
+      "elapsed_sec": 8.376,
+      "return_code": 0,
+      "command": "E:\\software\\anaconda\\anaconda\\python.exe D:\\wearing_liveness\\new\\new_codex_1\\parallel\\s06_select_features.py --artifact_dir D:\\wearing_liveness\\new\\new_codex_1\\parallel\\artifacts_timing_check --max_features 12",
+      "order": 3,
+      "elapsed_human": "8s"
+    },
+    {
+      "step": "S07-Train",
+      "status": "success",
+      "elapsed_sec": 1.9,
+      "return_code": 0,
+      "command": "E:\\software\\anaconda\\anaconda\\python.exe D:\\wearing_liveness\\new\\new_codex_1\\parallel\\s07_train_model.py --artifact_dir D:\\wearing_liveness\\new\\new_codex_1\\parallel\\artifacts_timing_check --n_estimators 10 --max_depth 2",
+      "order": 4,
+      "elapsed_human": "2s"
+    },
+    {
+      "step": "S08-Fusion",
+      "status": "success",
+      "elapsed_sec": 1.836,
+      "return_code": 0,
+      "command": "E:\\software\\anaconda\\anaconda\\python.exe D:\\wearing_liveness\\new\\new_codex_1\\parallel\\s08_fusion.py --artifact_dir D:\\wearing_liveness\\new\\new_codex_1\\parallel\\artifacts_timing_check --strategy veto",
+      "order": 5,
+      "elapsed_human": "2s"
+    },
+    {
+      "step": "S09-Evaluate",
+      "status": "success",
+      "elapsed_sec": 3.119,
+      "return_code": 0,
+      "command": "E:\\software\\anaconda\\anaconda\\python.exe D:\\wearing_liveness\\new\\new_codex_1\\parallel\\s09_evaluate.py --artifact_dir D:\\wearing_liveness\\new\\new_codex_1\\parallel\\artifacts_timing_check --splits_dir D:\\wearing_liveness\\new\\new_codex_1\\parallel\\artifacts_deploy_check_20260705 --split test --guard_mode shadow --min_veto_windows 2 --min_veto_ratio 0.4",
+      "order": 6,
+      "elapsed_human": "3s"
+    }
+  ]
+}

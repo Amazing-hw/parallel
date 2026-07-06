@@ -1,0 +1,5 @@
+split,samples,rows,elapsed_sec,samples_per_sec,rows_per_sec
+train,16,112,4.618,3.464581,24.252066
+valid,4,28,1.162,3.442616,24.098315
+test,4,28,1.156,3.461632,24.231426
+total,24,168,6.936,3.460079,24.22055
