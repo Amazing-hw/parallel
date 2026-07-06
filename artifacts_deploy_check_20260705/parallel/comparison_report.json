@@ -1,0 +1,31 @@
+{
+  "n": 4,
+  "commercial": {
+    "accuracy": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1": 0.0,
+    "confusion": {
+      "TN": 0,
+      "FP": 2,
+      "FN": 2,
+      "TP": 0
+    }
+  },
+  "guard": {
+    "accuracy": 0.0,
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1": 0.0,
+    "confusion": {
+      "TN": 0,
+      "FP": 2,
+      "FN": 2,
+      "TP": 0
+    }
+  },
+  "fixed_count": 0,
+  "broken_count": 0,
+  "fixed_samples": [],
+  "broken_samples": []
+}

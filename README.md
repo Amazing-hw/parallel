@@ -4,6 +4,185 @@
 
 这个方案更适合做数据分析、特征研究、样本分布分析和独立风险评估。相比 `cascade`，它不只关注商用阳性错误候选，而是会在所有窗口上训练和评估一个并联模型。
 
+## 0. 先看这一节：如何理解整个项目
+
+这一节用于快速建立全局认识。后面的章节会逐个解释代码文件、参数、产物和使用方法。
+
+### 0.1 一句话理解 parallel
+
+`parallel` 不是替换商用模型，而是在商用模型旁边训练一个独立的小模型，用来做风险复核、数据分布分析和可解释性研究。
+
+```text
+商用模型仍然完整保留。
+并联小模型独立提取 PPG/ACC 特征，给出非佩戴风险。
+默认 shadow 模式只记录风险，不改变商用最终输出。
+```
+
+### 0.2 端到端运行流程图
+
+```mermaid
+flowchart TD
+    A["H5 数据集<br/>PPG / ACC / target"] --> B["S10 pipeline<br/>统一调度"]
+    B --> C{"是否已有<br/>artifacts/splits.json"}
+    C -- "有，且未指定 --force_split" --> D["复用固定 split"]
+    C -- "没有，或指定 --force_split" --> E["S04 扫描 H5<br/>stratified train/valid/test split"]
+    E --> D
+    D --> F["S05 提取特征<br/>商用输出 + 新增 PPG/ACC 特征<br/>带进度显示"]
+    F --> G["S06 特征排序<br/>生成 ranked_features 和人工模板"]
+    G --> H["S07 训练并联小模型<br/>XGBoost"]
+    H --> I["S08 生成 fusion_config<br/>valid 集上确定 veto 策略"]
+    I --> J["S09 评估<br/>commercial_pred vs parallel_pred"]
+    J --> K{"是否加 --explain"}
+    K -- "否" --> L["结束：评估报告和部署包"]
+    K -- "是" --> M["S11 解释性报告<br/>PNG 图、树结构、错误路径"]
+    M --> L
+```
+
+关键点：
+
+- split 在 `S05` 之前完成。`S10` 会先生成或复用 `splits.json`，然后才提取特征。
+- 如果已经存在 `splits.json`，默认不会重新划分，所以日志中会显示复用 split。
+- `S05` 时间较长，因为它要逐样本、逐窗口提取商用输出和新增特征；当前已经增加进度输出。
+
+### 0.3 商用模型和并联模型的数据流
+
+```mermaid
+flowchart LR
+    A["原始 PPG/ACC"] --> B["冻结商用模型 M_c"]
+    A --> C["新增特征池"]
+    B --> D["commercial_score<br/>commercial_pred"]
+    C --> E["小 XGBoost M_n"]
+    E --> F["new_model probability<br/>veto risk"]
+    D --> G["fusion / guard"]
+    F --> G
+    G --> H["parallel_pred<br/>guard_action<br/>risk_ratio"]
+```
+
+并联方案比串联方案更适合做研究分析，因为它会在所有可提取窗口上形成特征池，而不是只看商用阳性候选。
+
+### 0.4 商用模型冻结边界图
+
+```mermaid
+flowchart LR
+    subgraph Frozen["冻结商用部分：不改特征、不改参数、不改树"]
+        A["s01_model.py"]
+        B["商用 8 特征"]
+        C["OldLivenessModel"]
+        D["TREE_INDEX / TREE_VALUE"]
+        E["detect_tree_threshold"]
+        A --> B
+        A --> C
+        A --> D
+        A --> E
+    end
+
+    subgraph Added["新增并联部分：独立风险评估"]
+        F["features_*.csv"]
+        G["selected_features.json"]
+        H["new_model_bundle.pkl"]
+        I["fusion_config.json"]
+        J["guard_action / risk_ratio"]
+    end
+
+    C --> F
+    F --> G
+    G --> H
+    H --> I
+    I --> J
+```
+
+验收时优先看：
+
+```text
+artifacts/parallel/commercial_model_manifest.json
+```
+
+其中 `frozen=true`，并且 `tree_index_sha256`、`tree_value_sha256` 不变，说明商用模型参数保持冻结。
+
+### 0.5 fusion 和 guard 决策图
+
+```mermaid
+flowchart TD
+    A["商用输出 commercial_pred"] --> B["fusion_config<br/>veto strategy"]
+    C["并联模型风险 veto_risk"] --> B
+    B --> D{"guard_mode"}
+    D -- "bypass" --> E["最终输出 = commercial_pred<br/>完全回退"]
+    D -- "shadow" --> F["最终输出 = commercial_pred<br/>只记录风险和分歧"]
+    D -- "soft_guard" --> G{"风险是否持续"}
+    G -- "否" --> H["最终输出 = commercial_pred"]
+    G -- "是" --> I["仍不直接推翻商用<br/>建议延长检测或进入保守后处理"]
+    D -- "hard_veto" --> J{"commercial_pred=1<br/>且风险持续"}
+    J -- "否" --> K["最终输出 = commercial_pred"]
+    J -- "是" --> L["最终输出可改为 0<br/>仅建议离线或严格灰度"]
+```
+
+推荐顺序：
+
+```text
+先 shadow -> 用数据验证风险分布 -> 再考虑 soft_guard -> 最后才考虑 hard_veto
+```
+
+### 0.6 人工特征选择闭环图
+
+```mermaid
+flowchart TD
+    A["第一次运行 pipeline"] --> B["生成 features_*.csv"]
+    B --> C["生成 feature_review/ranked_features.*"]
+    C --> D["人工查看排序、稳定性、业务可解释性"]
+    D --> E["编辑 manual_feature_selection.json"]
+    E --> F["第二次运行 pipeline<br/>--manual_features manual_feature_selection.json"]
+    F --> G["重新训练 new_model_bundle.pkl"]
+    G --> H["重新生成 fusion_config.json"]
+    H --> I["重新评估 evaluation_report.json"]
+    I --> J["查看 tree_export / error_trace / figures"]
+    J --> D
+```
+
+这个闭环的目的不是追求训练集指标最高，而是让新增特征满足：
+
+- 能解释。
+- 能部署。
+- 在 train/valid/test 上表现一致。
+- 不依赖标签泄漏字段。
+- 能帮助理解误判佩戴、误拒、模型分歧和数据分布。
+
+### 0.7 产物关系和部署文件图
+
+```mermaid
+flowchart TD
+    A["splits.json<br/>固定数据划分"] --> B["features_*.csv<br/>商用输出 + 新增特征"]
+    B --> C["feature_review/ranked_features.*"]
+    C --> D["selected_features.json<br/>或 manual_feature_selection.json"]
+    D --> E["new_model_bundle.pkl<br/>并联模型部署核心文件"]
+    E --> F["fusion_config.json<br/>融合策略"]
+    F --> G["evaluation_report.json<br/>评估摘要"]
+    E --> H["tree_export/<br/>树结构"]
+    E --> I["error_trace/<br/>错误路径"]
+    G --> J["figures/*.png<br/>可视化结果"]
+```
+
+最终部署或交付时，至少保留：
+
+```text
+commercial_model_manifest.json
+splits.json
+features_train.csv
+features_valid.csv
+features_test.csv
+selected_features.json
+feature_review/manual_feature_selection.json
+new_model.json
+new_model_bundle.pkl
+fusion_config.json
+evaluation_report.json
+evaluation_comparison.csv
+figures/*.png
+tree_export/*
+error_trace/*
+```
+
+注意：`tree_*.png` 依赖系统安装 Graphviz `dot`。如果没有 Graphviz，项目仍会输出 `tree_*.json`、`tree_*.dot` 和 `all_trees.txt`，可解释信息不会丢失。
+
 ## 1. 项目定位
 
 并联方案的推理路径是：
@@ -616,6 +795,300 @@ fallback
 - 支持树结构可视化和错误样本路径追踪。
 - 支持人工特征选择。
 - 适合做数据分布、样本错误和特征可解释性分析。
+
+## 附录 A：数据/特征完整报告与人工特征闭环
+
+本项目已经具备数据分析、特征排序、人工特征确认、重新训练和可解释性复核的闭环能力。这里的“完整报告”不是单个文件，而是一组围绕样本、特征、模型和错误路径的产物。
+
+### A.1 当前会自动生成哪些报告
+
+运行完整 pipeline 并打开 `--explain` 后：
+
+```bash
+python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --guard_mode shadow --explain
+```
+
+会生成以下几类报告。
+
+#### 1. 数据切分报告
+
+位置：
+
+```text
+artifacts/splits.json
+```
+
+用途：
+
+- 记录 train/valid/test 的样本列表。
+- 固定后续所有实验的数据划分。
+- 后续默认复用，避免每次运行切分变化。
+
+如果要重新切分：
+
+```bash
+python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --force_split
+```
+
+#### 2. 商用模型冻结报告
+
+位置：
+
+```text
+artifacts/parallel/commercial_model_manifest.json
+```
+
+用途：
+
+- 证明商用模型参数没有被新增方案修改。
+- 记录商用特征名、树数量、树节点数、阈值和树数组哈希。
+- 用于上线验收时对比 `tree_index_sha256` 和 `tree_value_sha256`。
+
+#### 3. 并联特征池
+
+位置：
+
+```text
+artifacts/parallel/features_train.csv
+artifacts/parallel/features_valid.csv
+artifacts/parallel/features_test.csv
+```
+
+用途：
+
+- 保存所有可提取窗口的商用输出和新增 PPG/ACC 特征。
+- 用于观察整体数据分布，而不只看商用阳性错误候选。
+- 支持后续特征排序、并联模型训练和错误样本追踪。
+
+#### 4. 特征排序和人工审核报告
+
+位置：
+
+```text
+artifacts/parallel/feature_review/
+```
+
+包含：
+
+```text
+ranked_features.csv
+ranked_features.json
+ranked_features.md
+manual_feature_selection_template.json
+```
+
+用途：
+
+- `ranked_features.csv`：适合用 Excel 或脚本查看完整排序。
+- `ranked_features.json`：适合程序读取。
+- `ranked_features.md`：适合人工阅读。
+- `manual_feature_selection_template.json`：供你手工指定最终训练特征。
+
+排序报告会记录每个候选特征的稳定性、训练/验证 AUC、是否自动入选等信息。训练标签和泄漏字段不会进入候选池。
+
+#### 5. 融合配置报告
+
+位置：
+
+```text
+artifacts/parallel/fusion_config.json
+```
+
+用途：
+
+- 记录当前融合策略。
+- 记录并联模型风险阈值。
+- 记录 valid 集上商用模型、新模型和 veto 策略的对比结果。
+
+#### 6. 商用基线 vs 完整方案评估报告
+
+位置：
+
+```text
+artifacts/parallel/evaluation_report.json
+artifacts/parallel/evaluation_samples.csv
+artifacts/parallel/evaluation_comparison.csv
+```
+
+用途：
+
+- 对比只依赖商用模型的 `commercial_pred` 和完整方案的 `parallel_pred`。
+- 查看准确率、precision、recall、F1、混淆矩阵。
+- 在 `shadow` 模式下，`parallel_pred` 不改变商用输出，但仍记录风险。
+
+#### 7. 可解释性图片
+
+位置：
+
+```text
+artifacts/parallel/figures/*.png
+```
+
+当前图片策略：只输出高清 PNG，不输出 PDF、SVG、TIFF。
+
+主要图片包括：
+
+- 商用基线 vs 完整方案指标对比。
+- 样本流转 funnel。
+- 错误类型分布。
+- guard risk 分布。
+
+#### 8. 树结构可视化
+
+位置：
+
+```text
+artifacts/parallel/tree_export/
+```
+
+包含：
+
+```text
+all_trees.txt
+tree_*.json
+tree_*.dot
+tree_*.png
+model_structure_summary.csv
+```
+
+用途：
+
+- 查看并联小 XGBoost 每棵树的完整结构。
+- 检查树深度、分裂特征和阈值是否可解释。
+- 判断模型是否过度依赖某一个特征或明显异常阈值。
+
+#### 9. 错误样本路径追踪
+
+位置：
+
+```text
+artifacts/parallel/error_trace/
+```
+
+包含：
+
+```text
+error_samples.csv
+error_tree_paths.csv
+error_escape_rules.csv
+error_escape_rules.md
+error_path_node_frequency.png
+```
+
+用途：
+
+- 找出最终仍然错误的样本。
+- 记录这些错误样本经过了哪些树、哪些节点、哪些分支。
+- 总结高频错误路径，辅助判断模型是否学到了不合理规则。
+
+### A.2 推荐的人工特征选择流程
+
+当前 pipeline 不会在特征排序后自动暂停。因此推荐采用“两次运行”的方式。
+
+#### 第一步：先生成排序报告和人工模板
+
+```bash
+cd D:\wearing_liveness\new\new_codex_1\parallel
+python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --guard_mode shadow --explain
+```
+
+这一步会自动完成特征排序、自动选择、训练、融合和评估。第一次训练结果可以作为参考，但不是最终结果。
+
+重点查看：
+
+```text
+artifacts/parallel/feature_review/ranked_features.csv
+artifacts/parallel/feature_review/ranked_features.md
+artifacts/parallel/feature_review/manual_feature_selection_template.json
+```
+
+#### 第二步：人工指定最终特征
+
+复制模板：
+
+```text
+manual_feature_selection_template.json
+```
+
+另存为：
+
+```text
+manual_feature_selection.json
+```
+
+编辑其中的：
+
+```json
+{
+  "selected_features": [
+    "GTOP2_zero_cross_rate",
+    "GREEN_SEG_ACDC_CV",
+    "ACC_MAG_MAD"
+  ]
+}
+```
+
+实际特征名必须来自 `ranked_features.csv` 或 `ranked_features.md`。
+
+#### 第三步：使用人工指定特征重新训练和评估
+
+```bash
+python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --manual_features artifacts/parallel/feature_review/manual_feature_selection.json --guard_mode shadow --explain
+```
+
+这次训练会优先使用你指定的 `selected_features`，而不是自动选择结果。
+
+### A.3 人工特征选择的保护机制
+
+训练脚本会拒绝明显的数据泄漏字段。如果手工文件中包含以下字段，会直接报错：
+
+```text
+target
+should_veto
+commercial_pred
+is_error
+fallback
+```
+
+这些字段不能用于模型训练，因为它们直接或间接包含标签、商用预测结果或错误状态。
+
+### A.4 建议人工审核哪些信息
+
+人工选择特征时，建议至少看以下几类信息：
+
+- `ranked_features.md`：排序靠前的特征是否符合业务直觉。
+- `ranked_features.csv`：训练集和验证集表现是否一致。
+- `features_*.csv`：特征是否在不同 split 上分布稳定。
+- `fusion_config.json`：并联模型参与 veto 后是否改善风险。
+- `evaluation_comparison.csv`：完整方案有没有修复商用错误，同时有没有引入新错误。
+- `tree_export/`：树结构是否过度依赖单一特征或异常阈值。
+- `error_trace/`：错误样本是否集中在某些分支节点。
+
+### A.5 推荐保留的交付材料
+
+一次完整实验建议至少保存：
+
+```text
+commercial_model_manifest.json
+splits.json
+features_train.csv
+features_valid.csv
+features_test.csv
+feature_review/ranked_features.csv
+feature_review/ranked_features.md
+feature_review/manual_feature_selection.json
+selected_features.json
+new_model.json
+new_model_bundle.pkl
+fusion_config.json
+evaluation_report.json
+evaluation_comparison.csv
+figures/*.png
+tree_export/*
+error_trace/*
+```
+
+这样可以完整复现：数据怎么切、特征怎么排、人工选了哪些特征、模型怎么训、融合策略是什么、最终效果如何、错误样本为什么错。
 
 ## 14. 注意事项
 

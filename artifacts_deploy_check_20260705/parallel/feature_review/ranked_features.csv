@@ -1,0 +1,2 @@
+rank,feature,group,auc_train,auc_valid,stability_score,missing_rate,freq,avg_importance,combined_score,selected_auto,recommendation
+1,GTOP2_zero_cross_rate,waveform_morphology,1.0,1.0,1.0,0.0,1.0,0.0,0.0,True,keep

@@ -15,6 +15,37 @@ from s02_features import is_prewindowed_signal, _downsample_ppg, _is_25hz_sample
 from s04_data import load_splits
 
 
+def _format_duration(seconds):
+    seconds = max(0, int(round(float(seconds))))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h:d}h{m:02d}m{s:02d}s"
+    if m:
+        return f"{m:d}m{s:02d}s"
+    return f"{s:d}s"
+
+
+def _print_progress(split_name, done, total, start_time, rows_count):
+    if total <= 0:
+        return
+    elapsed = max(1e-9, time.time() - start_time)
+    rate = done / elapsed
+    eta = (total - done) / rate if rate > 0 else 0.0
+    pct = 100.0 * done / total
+    print(
+        f"[{split_name}] {done}/{total} ({pct:5.1f}%) "
+        f"speed={rate:.2f} samples/s eta={_format_duration(eta)} rows={rows_count}",
+        flush=True,
+    )
+
+
+def _progress_interval(total):
+    if total <= 20:
+        return 1
+    return max(1, total // 20)
+
+
 def _to_25hz(s, ppg, acc):
     if _is_25hz_sample(s): return (np.asarray(ppg, dtype=np.float64),
         np.asarray(acc, dtype=np.float64) if acc is not None and len(acc) > 0 else None, 25)
@@ -85,9 +116,13 @@ def main():
     for name in ["train", "valid", "test"]:
         samples = splits[name][:args.max_samples] if args.max_samples else splits[name]
         rows = []
-        for i, s in enumerate(samples):
-            if len(samples) >= 10 and (i + 1) % max(1, len(samples) // 10) == 0: print(f"[{name}] {i+1}/{len(samples)}")
+        split_t0 = time.time()
+        interval = _progress_interval(len(samples))
+        print(f"[{name}] start: {len(samples)} samples", flush=True)
+        for i, s in enumerate(samples, start=1):
             rows.extend(extract_sample(s, model))
+            if i == 1 or i == len(samples) or i % interval == 0:
+                _print_progress(name, i, len(samples), split_t0, len(rows))
         df = pd.DataFrame(rows); df.to_csv(os.path.join(args.artifact_dir, f"features_{name}.csv"), index=False)
         print(f"[{name}] {len(df)} rows")
     print(f"Done ({time.time()-t0:.1f}s)")
