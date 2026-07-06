@@ -1,6 +1,0 @@
-digraph tree {
-  graph [rankdir=TB, bgcolor="white", margin=0.04];
-  node [shape=ellipse, style="rounded,filled", fillcolor="#F7F7FA", color="#606060", fontname="Arial", fontsize=10];
-  edge [color="#767676", fontname="Arial", fontsize=9];
-  0 [label="leaf=-0.00466879", shape=box];
-}

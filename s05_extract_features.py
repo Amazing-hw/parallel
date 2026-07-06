@@ -5,8 +5,13 @@ S05: Extract BOTH commercial scores and new features for ALL windows.
 Output: {artifact_dir}/features_{train,valid,test}.csv
 """
 
-import argparse, json, os, time
-import numpy as np, pandas as pd
+import argparse
+import json
+import os
+import time
+
+import numpy as np
+import pandas as pd
 
 from s01_model import OldLivenessModel, extract_8_commercial_features, FEATURE_FS, COMMERCIAL_WIN_SEC, COMMERCIAL_STRIDE_SEC
 from s01_model import commercial_model_manifest
@@ -46,10 +51,57 @@ def _progress_interval(total):
     return max(1, total // 20)
 
 
+def _safe_rate(count, elapsed):
+    return round(float(count) / float(elapsed), 6) if elapsed > 0 else None
+
+
+def _write_commercial_manifest(artifact_dir):
+    with open(os.path.join(artifact_dir, "commercial_model_manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(commercial_model_manifest(), f, indent=2, ensure_ascii=False)
+
+
+def _print_timing_summary(rows):
+    print("\n[S05 TIMING] split summary")
+    for row in rows:
+        print(
+            f"  {row['split']:<5} samples={row['samples']:>5} rows={row['rows']:>6} "
+            f"elapsed={row['elapsed_sec']:>7.1f}s "
+            f"speed={row['samples_per_sec'] or 0:.2f} samples/s"
+        )
+
+
+def _run_split(name, samples, model, artifact_dir):
+    rows = []
+    split_t0 = time.time()
+    interval = _progress_interval(len(samples))
+    print(f"[{name}] start: {len(samples)} samples", flush=True)
+    for i, sample in enumerate(samples, start=1):
+        rows.extend(extract_sample(sample, model))
+        if i == 1 or i == len(samples) or i % interval == 0:
+            _print_progress(name, i, len(samples), split_t0, len(rows))
+    df = pd.DataFrame(rows)
+    df.to_csv(os.path.join(artifact_dir, f"features_{name}.csv"), index=False)
+    elapsed = time.time() - split_t0
+    print(f"[{name}] {len(df)} rows, elapsed={_format_duration(elapsed)}")
+    return {
+        "split": name,
+        "samples": len(samples),
+        "rows": len(df),
+        "elapsed_sec": round(elapsed, 3),
+        "samples_per_sec": _safe_rate(len(samples), elapsed),
+        "rows_per_sec": _safe_rate(len(df), elapsed),
+    }
+
+
 def _to_25hz(s, ppg, acc):
-    if _is_25hz_sample(s): return (np.asarray(ppg, dtype=np.float64),
-        np.asarray(acc, dtype=np.float64) if acc is not None and len(acc) > 0 else None, 25)
-    ppg25 = _downsample_ppg(ppg, src_fs=100, tgt_fs=FEATURE_FS); acc25 = None
+    if _is_25hz_sample(s):
+        return (
+            np.asarray(ppg, dtype=np.float64),
+            np.asarray(acc, dtype=np.float64) if acc is not None and len(acc) > 0 else None,
+            25,
+        )
+    ppg25 = _downsample_ppg(ppg, src_fs=100, tgt_fs=FEATURE_FS)
+    acc25 = None
     if acc is not None and len(acc) > 0:
         from scipy.signal import resample_poly
         acc25 = resample_poly(np.asarray(acc, dtype=np.float32), FEATURE_FS, 100, axis=0).astype(np.float64)
@@ -87,10 +139,13 @@ def extract_sample(sample, model):
                 nf = extract_feature_pool_from_window(ir, amb, g1, g2, g3, fs=FEATURE_FS)
                 r = {**base, "window_idx": idx, "commercial_score": float(score) if score is not None else -2000.0,
                      "commercial_pred": is_live, "fallback": False, "fallback_reason": None}
-                r.update(nf); rows.append(r)
-            except Exception: continue
+                r.update(nf)
+                rows.append(r)
+            except Exception:
+                continue
         return rows
-    ppg25, acc25, _ = _to_25hz(sample, ppg, acc); mode = detect_green_mode(ppg)
+    ppg25, acc25, _ = _to_25hz(sample, ppg, acc)
+    mode = detect_green_mode(ppg)
     sw, ss = int(round(COMMERCIAL_WIN_SEC * FEATURE_FS)), int(round(COMMERCIAL_STRIDE_SEC * FEATURE_FS))
     for step in range(3, max(0, (len(ppg25) - sw) // ss + 1)):
         win = ppg25[step * ss:step * ss + sw, :]
@@ -101,30 +156,40 @@ def extract_sample(sample, model):
             nf = extract_feature_pool_from_window(ir, amb, g1, g2, g3, fs=FEATURE_FS)
             r = {**base, "window_idx": step, "commercial_score": float(score) if score is not None else -2000.0,
                  "commercial_pred": is_live, "fallback": False, "fallback_reason": None}
-            r.update(nf); rows.append(r)
-        except Exception: continue
+            r.update(nf)
+            rows.append(r)
+        except Exception:
+            continue
     return rows
 
 
 def main():
-    p = argparse.ArgumentParser(); p.add_argument("--artifact_dir", default="artifacts/parallel")
-    p.add_argument("--splits_dir", default="artifacts"); p.add_argument("--max_samples", type=int, default=None)
-    args = p.parse_args(); os.makedirs(args.artifact_dir, exist_ok=True)
-    with open(os.path.join(args.artifact_dir, "commercial_model_manifest.json"), "w", encoding="utf-8") as f:
-        json.dump(commercial_model_manifest(), f, indent=2, ensure_ascii=False)
-    splits = load_splits(args.splits_dir); model = OldLivenessModel(); t0 = time.time()
+    p = argparse.ArgumentParser()
+    p.add_argument("--artifact_dir", default="artifacts/parallel")
+    p.add_argument("--splits_dir", default="artifacts")
+    p.add_argument("--max_samples", type=int, default=None)
+    args = p.parse_args()
+
+    os.makedirs(args.artifact_dir, exist_ok=True)
+    _write_commercial_manifest(args.artifact_dir)
+    splits = load_splits(args.splits_dir)
+    model = OldLivenessModel()
+    t0 = time.time()
+    timing_rows = []
     for name in ["train", "valid", "test"]:
         samples = splits[name][:args.max_samples] if args.max_samples else splits[name]
-        rows = []
-        split_t0 = time.time()
-        interval = _progress_interval(len(samples))
-        print(f"[{name}] start: {len(samples)} samples", flush=True)
-        for i, s in enumerate(samples, start=1):
-            rows.extend(extract_sample(s, model))
-            if i == 1 or i == len(samples) or i % interval == 0:
-                _print_progress(name, i, len(samples), split_t0, len(rows))
-        df = pd.DataFrame(rows); df.to_csv(os.path.join(args.artifact_dir, f"features_{name}.csv"), index=False)
-        print(f"[{name}] {len(df)} rows")
-    print(f"Done ({time.time()-t0:.1f}s)")
+        timing_rows.append(_run_split(name, samples, model, args.artifact_dir))
+    total_elapsed = time.time() - t0
+    timing_rows.append({
+        "split": "total",
+        "samples": int(sum(r["samples"] for r in timing_rows)),
+        "rows": int(sum(r["rows"] for r in timing_rows)),
+        "elapsed_sec": round(total_elapsed, 3),
+        "samples_per_sec": _safe_rate(sum(r["samples"] for r in timing_rows), total_elapsed),
+        "rows_per_sec": _safe_rate(sum(r["rows"] for r in timing_rows), total_elapsed),
+    })
+    _print_timing_summary(timing_rows)
+    print(f"Done ({total_elapsed:.1f}s / {_format_duration(total_elapsed)})")
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    main()

@@ -1,5 +1,0 @@
-sample_name,target,commercial_pred,parallel_pred,bypass_pred,parallel_mean_prob,veto_risk,risk_count,window_count,risk_ratio,guard_action,decision_source,guard_mode,fallback,error_type
-s_0023,1,0,0,0,2.5388418668556767e-06,0.0,0,1,0.0,pass,commercial,shadow,False,false_reject
-s_0012,0,1,1,1,1.0,0.5007815062999725,0,7,0.0,pass,commercial,shadow,False,false_wearing
-s_0006,0,1,1,1,1.0,0.5007815062999725,0,7,0.0,pass,commercial,shadow,False,false_wearing
-s_0015,1,0,0,0,2.5388418668556767e-06,0.0,0,1,0.0,pass,commercial,shadow,False,false_reject

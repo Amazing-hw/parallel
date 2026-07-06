@@ -1,7 +1,0 @@
-{
-  "selected_features": [
-    "GTOP2_zero_cross_rate"
-  ],
-  "feature_source": "manual_deploy_check",
-  "notes": "Generated during deployment verification from selected_features.json"
-}
