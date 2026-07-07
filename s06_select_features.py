@@ -6,6 +6,7 @@ Output: {artifact_dir}/selected_features.json
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -35,6 +36,9 @@ LEAKAGE_AND_META_COLUMNS = {
 }
 
 
+SELECTION_CACHE_VERSION = 1
+
+
 def get_candidate_feature_cols(df):
     return [
         c for c in df.columns
@@ -53,6 +57,74 @@ def _safe_auc(y, values):
         return max(auc, 1.0 - auc)
     except Exception:
         return 0.5
+
+
+def feature_selection_cache_params(max_features, n_workers=None):
+    return {
+        "script": "parallel_s06_select_features",
+        "version": SELECTION_CACHE_VERSION,
+        "max_features": int(max_features),
+        "missing_thresh": 0.5,
+        "corr_thresh": 0.95,
+        "preselect_top": 6,
+        "seeds": [1, 7, 42],
+        "min_fold_auc": 0.55,
+        "deployment_score_weight": 0.15,
+        "commercial_score_included": False,
+        "n_workers": None if n_workers is None else int(n_workers),
+    }
+
+
+def _file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def compute_feature_selection_cache_key(input_paths, params):
+    inputs = []
+    for path in input_paths:
+        if path and os.path.exists(path):
+            inputs.append({"name": os.path.basename(path), "sha256": _file_sha256(path)})
+    payload = {"inputs": inputs, "params": params}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest(), payload
+
+
+def load_feature_selection_cache(artifact_dir, input_paths, params):
+    selected_path = os.path.join(artifact_dir, "selected_features.json")
+    cache_path = os.path.join(artifact_dir, "feature_review", "selection_cache.json")
+    if not (os.path.exists(selected_path) and os.path.exists(cache_path)):
+        return None
+    cache_key, _ = compute_feature_selection_cache_key(input_paths, params)
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            cache = json.load(f)
+        if cache.get("cache_key") != cache_key:
+            return None
+        with open(selected_path, "r", encoding="utf-8") as f:
+            selected_payload = json.load(f)
+    except Exception:
+        return None
+    cache["selected_features"] = list(selected_payload.get("selected_features", []))
+    return cache
+
+
+def write_feature_selection_cache(artifact_dir, input_paths, params, selected_features):
+    out_dir = os.path.join(artifact_dir, "feature_review")
+    os.makedirs(out_dir, exist_ok=True)
+    cache_key, payload = compute_feature_selection_cache_key(input_paths, params)
+    cache = {
+        "cache_key": cache_key,
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "selected_features": list(selected_features),
+        "payload": payload,
+    }
+    with open(os.path.join(out_dir, "selection_cache.json"), "w", encoding="utf-8") as f:
+        json.dump(cache, f, indent=2)
+    return cache
 
 
 def write_feature_review(artifact_dir, train_df, valid_df, ranked, selected_features, max_features):
@@ -105,22 +177,33 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--artifact_dir", default="artifacts/parallel")
     p.add_argument("--max_features", type=int, default=12)
+    p.add_argument("--n_workers", type=int, default=None)
     args = p.parse_args()
     os.makedirs(args.artifact_dir, exist_ok=True)
     tp = os.path.join(args.artifact_dir, "features_train.csv")
     if not os.path.exists(tp):
         print(f"ERROR: {tp} not found")
         sys.exit(1)
+    vp = os.path.join(args.artifact_dir, "features_valid.csv")
+    input_paths = [tp] + ([vp] if os.path.exists(vp) else [])
+    cache_params = feature_selection_cache_params(args.max_features, n_workers=args.n_workers)
+    cache = load_feature_selection_cache(args.artifact_dir, input_paths, cache_params)
+    if cache is not None:
+        print(f"Feature selection cache hit: {cache['cache_key']}")
+        print(f"Selected ({len(cache['selected_features'])}):")
+        for i, feature in enumerate(cache["selected_features"], start=1):
+            print(f"  {i}. {feature}")
+        print("Done (0.0s)")
+        return
     t0 = time.time()
     dt = pd.read_csv(tp)
-    vp = os.path.join(args.artifact_dir, "features_valid.csv")
     dv = pd.read_csv(vp) if os.path.exists(vp) else dt.copy()
     fcols = get_candidate_feature_cols(dt)
     dtc, dvc, kept, _, _ = clean_features_by_train(dt, dv, fcols, missing_thresh=0.5, corr_thresh=0.95, skip_vif=True)
     presel = fast_group_preselection(dtc, kept, preselect_top=6)
     presel_cols = sorted(presel.keys())
     stab = stability_selection(dtc, presel_cols, max_splits=min(5, dtc["sample_name"].nunique()),
-                               seeds=[1, 7, 42], min_fold_auc=0.55)
+                               seeds=[1, 7, 42], n_workers=args.n_workers, min_fold_auc=0.55)
     if not stab:
         stab = [{"feature": f, "freq": 1.0, "avg_importance": 0.01, "avg_rank": i, "group": feature_to_group(f)}
                 for i, f in enumerate(presel_cols)]
@@ -137,6 +220,7 @@ def main():
         print(f"  {i}. {feature}")
     with open(os.path.join(args.artifact_dir, "selected_features.json"), "w") as f:
         json.dump({"selected_features": feats, "n_features": len(feats), "commercial_score_included": False}, f, indent=2)
+    write_feature_selection_cache(args.artifact_dir, input_paths, cache_params, feats)
     print(f"Done ({time.time()-t0:.1f}s)")
 
 if __name__ == "__main__":

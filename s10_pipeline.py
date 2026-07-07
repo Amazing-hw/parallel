@@ -160,12 +160,15 @@ def main():
         extract_args += ["--max_samples", str(args.max_samples)]
     if args.n_workers is not None:
         extract_args += ["--n_workers", str(args.n_workers)]
+    select_args = ["--artifact_dir", paths["artifact_dir"], "--max_features", str(args.max_features)]
+    if args.n_workers is not None:
+        select_args += ["--n_workers", str(args.n_workers)]
     train_args = ["--artifact_dir", paths["artifact_dir"], "--n_estimators", str(args.n_estimators), "--max_depth", str(args.max_depth)]
     if args.manual_features:
         train_args += ["--manual_features", _abs_path(args.manual_features, d)]
     steps = [
         ("S05-Extract", os.path.join(d, "s05_extract_features.py"), extract_args),
-        ("S06-Select", os.path.join(d, "s06_select_features.py"), ["--artifact_dir", paths["artifact_dir"], "--max_features", str(args.max_features)]),
+        ("S06-Select", os.path.join(d, "s06_select_features.py"), select_args),
         ("S07-Train", os.path.join(d, "s07_train_model.py"), train_args),
         ("S08-Fusion", os.path.join(d, "s08_fusion.py"), ["--artifact_dir", paths["artifact_dir"], "--strategy", args.strategy]),
         ("S09-Evaluate", os.path.join(d, "s09_evaluate.py"),

@@ -555,6 +555,8 @@ artifacts/parallel/features_test.csv
 - 只从数值特征中选。
 - 自动排除标签、预测结果和泄漏字段。
 - 输出 ranked feature 和人工选择模板。
+- 支持 `--n_workers`，会传入底层稳定性选择的 fold 任务；运行时会打印每个 fold 的进度。
+- 支持输入哈希缓存。若 `features_train.csv`、`features_valid.csv` 和关键参数未变化，会直接复用 `selected_features.json` 与 `feature_review/`，跳过耗时的稳定性选择。
 
 输出：
 
@@ -564,6 +566,7 @@ artifacts/parallel/feature_review/ranked_features.csv
 artifacts/parallel/feature_review/ranked_features.json
 artifacts/parallel/feature_review/ranked_features.md
 artifacts/parallel/feature_review/manual_feature_selection_template.json
+artifacts/parallel/feature_review/selection_cache.json
 ```
 
 ### `s07_train_model.py`
@@ -725,7 +728,7 @@ python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --dry_run
 python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --guard_mode shadow --explain
 ```
 
-指定 worker 数运行。`--n_workers` 会用于首次扫描 H5 数据，也会传给 `S05` 做样本级并行：
+指定 worker 数运行。`--n_workers` 会用于首次扫描 H5 数据，也会传给 `S05` 做样本级并行，并传给 `S06` 加速稳定性选择：
 
 ```bash
 python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --guard_mode shadow --n_workers 4
