@@ -158,6 +158,12 @@ def _to_25hz(s, ppg, acc):
     return ppg25, acc25, 100
 
 
+def _slice_acc(acc25, start, size):
+    if acc25 is None or start >= len(acc25):
+        return None
+    return acc25[start:start + size]
+
+
 def _prewindow_to_25hz(s, w, ws):
     n = int(w.shape[0])
     if (_is_25hz_sample(s) or n == int(round(float(ws) * FEATURE_FS)) or (n <= 200 and n > 0 and n % FEATURE_FS == 0)):
@@ -184,8 +190,7 @@ def extract_sample(sample, model):
                 acc_seg = None
                 if acc is not None and is_prewindowed_signal(acc) and idx < acc.shape[0]:
                     acc_seg, _ = _prewindow_to_25hz(sample, acc[idx], COMMERCIAL_WIN_SEC)
-                _, score, _, _ = model.predict_raw(extract_8_commercial_features(ir, amb, g1, g2, g3, acc_seg))
-                is_live = 1 if (score is not None and score > -1000) else 0
+                is_live, score, _, _ = model.predict_raw(extract_8_commercial_features(ir, amb, g1, g2, g3, acc_seg))
                 nf = extract_feature_pool_from_window(ir, amb, g1, g2, g3, fs=FEATURE_FS)
                 r = {**base, "window_idx": idx, "commercial_score": float(score) if score is not None else -2000.0,
                      "commercial_pred": is_live, "fallback": False, "fallback_reason": None}
@@ -198,11 +203,12 @@ def extract_sample(sample, model):
     mode = detect_green_mode(ppg)
     sw, ss = int(round(COMMERCIAL_WIN_SEC * FEATURE_FS)), int(round(COMMERCIAL_STRIDE_SEC * FEATURE_FS))
     for step in range(3, max(0, (len(ppg25) - sw) // ss + 1)):
-        win = ppg25[step * ss:step * ss + sw, :]
+        start = step * ss
+        win = ppg25[start:start + sw, :]
         try:
             ir, amb, g1, g2, g3 = get_channels_from_window(win, mode)
-            _, score, _, _ = model.predict_raw(extract_8_commercial_features(ir, amb, g1, g2, g3, None))
-            is_live = 1 if (score is not None and score > -1000) else 0
+            acc_seg = _slice_acc(acc25, start, sw)
+            is_live, score, _, _ = model.predict_raw(extract_8_commercial_features(ir, amb, g1, g2, g3, acc_seg))
             nf = extract_feature_pool_from_window(ir, amb, g1, g2, g3, fs=FEATURE_FS)
             r = {**base, "window_idx": step, "commercial_score": float(score) if score is not None else -2000.0,
                  "commercial_pred": is_live, "fallback": False, "fallback_reason": None}

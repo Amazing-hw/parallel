@@ -823,7 +823,7 @@ def _run_one_fold(args_tuple):
         result = permutation_importance(
             model, X_va, y_va,
             scoring="roc_auc",
-            n_repeats=3,
+            n_repeats=int(data.get("permutation_repeats", 3)),
             random_state=seed,
             n_jobs=get_inner_n_jobs(),
         )
@@ -851,7 +851,15 @@ def _run_one_fold_serial(args_tuple, data):
         _WORKER_DATA = None
 
 
-def stability_selection(df, feature_cols, max_splits=5, seeds=None, n_workers=None, min_fold_auc=0.55):
+def stability_selection(
+    df,
+    feature_cols,
+    max_splits=5,
+    seeds=None,
+    n_workers=None,
+    min_fold_auc=0.55,
+    permutation_repeats=3,
+):
     if seeds is None:
         seeds = [1, 7, 42]  # 3 seeds (was 5)
 
@@ -881,7 +889,13 @@ def stability_selection(df, feature_cols, max_splits=5, seeds=None, n_workers=No
 
     n_workers = resolve_n_workers(n_workers, n_items=len(tasks))
 
-    data = {"X": X, "y": y, "feature_cols": feature_cols, "min_fold_auc": min_fold_auc}
+    data = {
+        "X": X,
+        "y": y,
+        "feature_cols": feature_cols,
+        "min_fold_auc": min_fold_auc,
+        "permutation_repeats": int(permutation_repeats),
+    }
 
     # 小数据集走单进程，跳过 pickle 序列化开销
     use_mp = n_workers > 1 and len(tasks) > 4

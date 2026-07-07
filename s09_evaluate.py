@@ -26,6 +26,12 @@ def _to_25hz(s, ppg, acc):
     return ppg25, acc25, 100
 
 
+def _slice_acc(acc25, start, size):
+    if acc25 is None or start >= len(acc25):
+        return None
+    return acc25[start:start + size]
+
+
 def _prewindow_to_25hz(s, w, ws):
     n = int(w.shape[0])
     if (_is_25hz_sample(s) or n == int(round(float(ws) * FEATURE_FS)) or (n <= 200 and n > 0 and n % FEATURE_FS == 0)):
@@ -71,6 +77,12 @@ def fuse_veto(P_c, P_n, hi=0.80, lo=0.20):
     return r
 
 
+def commercial_probabilities_from_rows(df):
+    if "commercial_pred" in df.columns:
+        return pd.to_numeric(df["commercial_pred"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    return df["commercial_score"].apply(score_to_prob).to_numpy(dtype=float)
+
+
 def metric(yt, yp):
     cm = confusion_matrix(yt, yp, labels=[0, 1]); tn, fp, fn, tp = cm.ravel()
     return {"n": len(yt), "accuracy": float(accuracy_score(yt, yp)),
@@ -78,6 +90,22 @@ def metric(yt, yp):
             "recall": float(recall_score(yt, yp, zero_division=0)),
             "f1": float(f1_score(yt, yp, zero_division=0)),
             "confusion": {"TN": int(tn), "FP": int(fp), "FN": int(fn), "TP": int(tp)}}
+
+
+def confusion_matrix_rows(model_name, metrics):
+    c = metrics["confusion"]
+    return [
+        {"model": model_name, "true_label": 0, "pred_0": int(c["TN"]), "pred_1": int(c["FP"])},
+        {"model": model_name, "true_label": 1, "pred_0": int(c["FN"]), "pred_1": int(c["TP"])},
+    ]
+
+
+def print_confusion_matrix(title, metrics):
+    c = metrics["confusion"]
+    print(f"{title} confusion matrix (rows=true label, cols=pred label)")
+    print("              pred_0  pred_1")
+    print(f"  true_0      {int(c['TN']):6d}  {int(c['FP']):6d}")
+    print(f"  true_1      {int(c['FN']):6d}  {int(c['TP']):6d}")
 
 
 GUARD_MODES = ("bypass", "shadow", "soft_guard", "hard_veto")
@@ -171,7 +199,7 @@ def evaluate_cached_feature_rows(
     vp = fcfg.get("veto_params", {})
     p_c_high, p_n_low = float(vp.get("p_c_high", 0.8)), float(vp.get("p_n_low", 0.2))
     work = df.copy()
-    work["P_c"] = work["commercial_score"].apply(score_to_prob)
+    work["P_c"] = commercial_probabilities_from_rows(work)
     work["P_n"] = predict_new_many(work, bundle)
 
     results = []
@@ -198,6 +226,32 @@ def evaluate_cached_feature_rows(
                         "decision_source": decision["decision_source"],
                         "guard_mode": guard_mode, "fallback": False})
     return results
+
+
+def write_evaluation_outputs(artifact_dir, split, strat, guard_mode, min_veto_windows, min_veto_ratio, results):
+    cm = metric([r["target"] for r in results], [r["commercial_pred"] for r in results])
+    pm = metric([r["target"] for r in results], [r["parallel_pred"] for r in results])
+    disc = [r for r in results if r["commercial_pred"] != r["parallel_pred"]]
+    fixed = sum(1 for d in disc if d["parallel_pred"] == d["target"] and d["commercial_pred"] != d["target"])
+    broken = sum(1 for d in disc if d["commercial_pred"] == d["target"] and d["parallel_pred"] != d["target"])
+    print(f"Commercial: acc={cm['accuracy']:.4f} prec={cm['precision']:.4f} rec={cm['recall']:.4f} f1={cm['f1']:.4f}")
+    print_confusion_matrix("Commercial baseline", cm)
+    print(f"Parallel:   acc={pm['accuracy']:.4f} prec={pm['precision']:.4f} rec={pm['recall']:.4f} f1={pm['f1']:.4f}")
+    print_confusion_matrix("Parallel final", pm)
+    print(f"Disagreements: {len(disc)}/{len(results)} (fixed={fixed}, broken={broken})")
+    report = {"split": split, "n": len(results), "fusion": strat, "guard_mode": guard_mode,
+              "min_veto_windows": min_veto_windows, "min_veto_ratio": min_veto_ratio,
+              "commercial": cm, "parallel": pm,
+              "bypass": cm, "n_disagreements": len(disc), "fixed": fixed, "broken": broken}
+    with open(os.path.join(artifact_dir, "evaluation_report.json"), "w") as f:
+        json.dump(report, f, indent=2)
+    pd.DataFrame(results).to_csv(os.path.join(artifact_dir, "evaluation_samples.csv"), index=False)
+    pd.DataFrame([{"metric": m, "commercial": cm[m], "parallel": pm[m], "delta": pm[m] - cm[m]}
+                  for m in ["accuracy", "precision", "recall", "f1"]])\
+      .to_csv(os.path.join(artifact_dir, "evaluation_comparison.csv"), index=False)
+    pd.DataFrame(
+        confusion_matrix_rows("commercial", cm) + confusion_matrix_rows("parallel", pm)
+    ).to_csv(os.path.join(artifact_dir, "evaluation_confusion_matrices.csv"), index=False)
 
 
 def main():
@@ -241,19 +295,22 @@ def main():
                         acc_seg = None
                         if acc is not None and is_prewindowed_signal(acc) and idx < acc.shape[0]:
                             acc_seg, _ = _prewindow_to_25hz(sample, acc[idx], COMMERCIAL_WIN_SEC)
-                        _, score, _, _ = com.predict_raw(extract_8_commercial_features(ir, amb, g1, g2, g3, acc_seg))
-                        Pc.append(score_to_prob(score))
+                        is_live, score, _, _ = com.predict_raw(extract_8_commercial_features(ir, amb, g1, g2, g3, acc_seg))
+                        Pc.append(float(is_live))
                         Pn.append(predict_new(extract_feature_pool_from_window(ir, amb, g1, g2, g3, fs=FEATURE_FS), bundle))
                     except Exception: Pc.append(0.0); Pn.append(0.5)
             else:
                 ppg25, acc25, _ = _to_25hz(sample, ppg, acc); mode = detect_green_mode(ppg)
                 sw, ss = int(round(COMMERCIAL_WIN_SEC * FEATURE_FS)), int(round(COMMERCIAL_STRIDE_SEC * FEATURE_FS))
                 for step in range(3, max(0, (len(ppg25) - sw) // ss + 1)):
-                    win = ppg25[step * ss:step * ss + sw, :]
+                    start = step * ss
+                    win = ppg25[start:start + sw, :]
                     try:
                         ir, amb, g1, g2, g3 = get_channels_from_window(win, mode)
-                        _, score, _, _ = com.predict_raw(extract_8_commercial_features(ir, amb, g1, g2, g3, None))
-                        Pc.append(score_to_prob(score))
+                        is_live, score, _, _ = com.predict_raw(
+                            extract_8_commercial_features(ir, amb, g1, g2, g3, _slice_acc(acc25, start, sw))
+                        )
+                        Pc.append(float(is_live))
                         Pn.append(predict_new(extract_feature_pool_from_window(ir, amb, g1, g2, g3, fs=FEATURE_FS), bundle))
                     except Exception: Pc.append(0.0); Pn.append(0.5)
             if not Pc:
@@ -278,23 +335,10 @@ def main():
                             "decision_source": decision["decision_source"],
                             "guard_mode": args.guard_mode, "fallback": False})
     print(f"Inference ({time.time()-t0:.1f}s)")
-    cm = metric([r["target"] for r in results], [r["commercial_pred"] for r in results])
-    pm = metric([r["target"] for r in results], [r["parallel_pred"] for r in results])
-    disc = [r for r in results if r["commercial_pred"] != r["parallel_pred"]]
-    fixed = sum(1 for d in disc if d["parallel_pred"] == d["target"] and d["commercial_pred"] != d["target"])
-    broken = sum(1 for d in disc if d["commercial_pred"] == d["target"] and d["parallel_pred"] != d["target"])
-    print(f"Commercial: acc={cm['accuracy']:.4f} prec={cm['precision']:.4f} rec={cm['recall']:.4f} f1={cm['f1']:.4f}")
-    print(f"Parallel:   acc={pm['accuracy']:.4f} prec={pm['precision']:.4f} rec={pm['recall']:.4f} f1={pm['f1']:.4f}")
-    print(f"Disagreements: {len(disc)}/{len(results)} (fixed={fixed}, broken={broken})")
-    report = {"split": args.split, "n": len(results), "fusion": strat, "guard_mode": args.guard_mode,
-              "min_veto_windows": args.min_veto_windows, "min_veto_ratio": args.min_veto_ratio,
-              "commercial": cm, "parallel": pm,
-              "bypass": cm, "n_disagreements": len(disc), "fixed": fixed, "broken": broken}
-    with open(os.path.join(args.artifact_dir, "evaluation_report.json"), "w") as f: json.dump(report, f, indent=2)
-    pd.DataFrame(results).to_csv(os.path.join(args.artifact_dir, "evaluation_samples.csv"), index=False)
-    pd.DataFrame([{"metric": m, "commercial": cm[m], "parallel": pm[m], "delta": pm[m] - cm[m]}
-                  for m in ["accuracy", "precision", "recall", "f1"]])\
-      .to_csv(os.path.join(args.artifact_dir, "evaluation_comparison.csv"), index=False)
+    write_evaluation_outputs(
+        args.artifact_dir, args.split, strat, args.guard_mode,
+        args.min_veto_windows, args.min_veto_ratio, results
+    )
     print("Done")
 
 if __name__ == "__main__": main()

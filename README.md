@@ -4,7 +4,7 @@
 
 这个方案更适合做数据分析、特征研究、样本分布分析和独立风险评估。相比 `cascade`，它不只关注商用阳性错误候选，而是会在所有窗口上训练和评估一个并联模型。
 
-## 新手快速上手
+## 新手快速开始
 
 如果你第一次接触这个项目，先按这一节跑通最小流程，再看后面的原理、特征分析和可解释性报告。
 
@@ -557,6 +557,10 @@ artifacts/parallel/features_test.csv
 - 输出 ranked feature 和人工选择模板。
 - 支持 `--n_workers`，会传入底层稳定性选择的 fold 任务；运行时会打印每个 fold 的进度。
 - 支持输入哈希缓存。若 `features_train.csv`、`features_valid.csv` 和关键参数未变化，会直接复用 `selected_features.json` 与 `feature_review/`，跳过耗时的稳定性选择。
+- 默认采用快速筛选配置：`--preselect_top 4 --stability_splits 4 --stability_seeds 1,7 --stability_max_rows 5000`。它参考了 `new_new` 的加速思路，先压缩候选特征和训练行数，再做稳定性选择。
+- 支持 `--rank_only`，只做特征清洗、组内预筛和排序报告，不跑稳定性选择。这个模式适合先快速得到 `ranked_features.csv`，再由人工决定哪些特征可用于训练。
+- 支持 `--permutation_repeats` 控制稳定性选择中 permutation importance 的重复次数。默认 `3` 更稳，快速探索可设为 `1`。
+- 如果要恢复更严格但更慢的旧配置，可以使用：`--preselect_top 6 --stability_splits 5 --stability_seeds 1,7,42 --stability_max_rows 0`。
 
 输出：
 
@@ -628,6 +632,7 @@ artifacts/parallel/fusion_config.json
 artifacts/parallel/evaluation_report.json
 artifacts/parallel/evaluation_samples.csv
 artifacts/parallel/evaluation_comparison.csv
+artifacts/parallel/evaluation_confusion_matrices.csv
 ```
 
 核心对比：
@@ -655,7 +660,7 @@ artifacts/parallel/features_{split}.csv
 ```text
 自动生成或读取 splits.json
 S05 提取商用输出和新增特征
-S06 选择特征
+S06 选择特征，可通过 --n_workers、--rank_only、--permutation_repeats 加速
 S07 训练并联小模型
 S08 生成 fusion 配置
 S09 评估
@@ -673,6 +678,8 @@ S11 可解释性报告，可选
 - 错误样本分布图。
 - XGBoost 树结构导出。
 - 错误样本经过了哪些树节点。
+
+`--plot_mode basic` 只生成指标对比、样本流转、错误分布、风险样本和特征排序图，跳过树导出和错误路径追踪，适合快速检查和日常迭代。默认 `--plot_mode full` 保留完整解释性产物，适合整理汇报材料。
 
 输出目录：
 
@@ -732,6 +739,30 @@ python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --guard_mode sh
 
 ```bash
 python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --guard_mode shadow --n_workers 4
+```
+
+特征筛选和稳定性选择耗时很长时，可以显式使用快速配置：
+
+```bash
+python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --guard_mode shadow --n_workers 4 --preselect_top 4 --stability_splits 4 --stability_seeds 1,7 --stability_max_rows 5000
+```
+
+如果当前目标只是先得到特征排序和人工选择模板，建议使用更快的排序模式：
+
+```bash
+python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --guard_mode shadow --n_workers 4 --rank_only --permutation_repeats 1
+```
+
+如果需要解释性图片但暂时不需要树结构和错误路径细节，可以使用 basic 绘图模式：
+
+```bash
+python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --guard_mode shadow --explain --plot_mode basic
+```
+
+如果要离线做更充分的排序复核，可以恢复旧的严格配置：
+
+```bash
+python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --guard_mode shadow --n_workers 4 --preselect_top 6 --stability_splits 5 --stability_seeds 1,7,42 --stability_max_rows 0
 ```
 
 如果数据量较小，建议保持默认或显式使用串行，避免多进程启动开销：
@@ -896,6 +927,20 @@ fallback
 - guard action。
 - risk ratio。
 - 是否 fallback。
+
+### `evaluation_confusion_matrices.csv`
+
+0/1 样本混淆矩阵，行是真实标签，列是预测标签：
+
+```text
+model,true_label,pred_0,pred_1
+commercial,0,TN,FP
+commercial,1,FN,TP
+parallel,0,TN,FP
+parallel,1,FN,TP
+```
+
+`S09` 运行时也会在终端打印商用基线和并联完整方案的矩阵，便于直接比较并联风险复核是否减少 `true_label=0, pred_1` 的误判佩戴。
 
 ### `tree_export/`
 

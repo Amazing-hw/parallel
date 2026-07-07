@@ -59,15 +59,69 @@ def _safe_auc(y, values):
         return 0.5
 
 
-def feature_selection_cache_params(max_features, n_workers=None):
+def parse_stability_seeds(value):
+    if isinstance(value, (list, tuple)):
+        return [int(x) for x in value]
+    seeds = []
+    for part in str(value).split(","):
+        part = part.strip()
+        if part:
+            seeds.append(int(part))
+    return seeds or [1, 7]
+
+
+def limit_rows_for_stability(df, max_rows=5000, random_state=42):
+    if max_rows is None or int(max_rows) <= 0 or len(df) <= int(max_rows):
+        return df
+    if "sample_name" not in df.columns or "target" not in df.columns:
+        return df.sample(n=min(len(df), int(max_rows)), random_state=random_state).copy()
+
+    rng = np.random.default_rng(int(random_state))
+    sizes = df.groupby("sample_name").size()
+    targets = df.groupby("sample_name")["target"].first()
+    selected = []
+    for target_value in sorted(targets.dropna().unique()):
+        group_names = targets[targets == target_value].index.to_numpy()
+        rng.shuffle(group_names)
+        quota = max(1, int(round(int(max_rows) * (df["target"] == target_value).mean())))
+        used = 0
+        for name in group_names:
+            selected.append(name)
+            used += int(sizes.loc[name])
+            if used >= quota:
+                break
+    if not selected:
+        return df
+    limited = df[df["sample_name"].isin(selected)].copy()
+    if limited["target"].nunique() < min(2, df["target"].nunique()):
+        return df
+    print(f"Stability row limit: {len(df)} -> {len(limited)} rows, samples={limited['sample_name'].nunique()}")
+    return limited
+
+
+def feature_selection_cache_params(
+    max_features,
+    n_workers=None,
+    preselect_top=4,
+    stability_splits=4,
+    stability_seeds=None,
+    stability_max_rows=5000,
+    permutation_repeats=3,
+    rank_only=False,
+):
+    stability_seeds = parse_stability_seeds(stability_seeds if stability_seeds is not None else "1,7")
     return {
         "script": "parallel_s06_select_features",
         "version": SELECTION_CACHE_VERSION,
         "max_features": int(max_features),
         "missing_thresh": 0.5,
         "corr_thresh": 0.95,
-        "preselect_top": 6,
-        "seeds": [1, 7, 42],
+        "preselect_top": int(preselect_top),
+        "stability_splits": int(stability_splits),
+        "stability_seeds": stability_seeds,
+        "stability_max_rows": int(stability_max_rows or 0),
+        "permutation_repeats": int(permutation_repeats),
+        "rank_only": bool(rank_only),
         "min_fold_auc": 0.55,
         "deployment_score_weight": 0.15,
         "commercial_score_included": False,
@@ -178,6 +232,12 @@ def main():
     p.add_argument("--artifact_dir", default="artifacts/parallel")
     p.add_argument("--max_features", type=int, default=12)
     p.add_argument("--n_workers", type=int, default=None)
+    p.add_argument("--preselect_top", type=int, default=4)
+    p.add_argument("--stability_splits", type=int, default=4)
+    p.add_argument("--stability_seeds", default="1,7")
+    p.add_argument("--stability_max_rows", type=int, default=5000)
+    p.add_argument("--permutation_repeats", type=int, default=3)
+    p.add_argument("--rank_only", action="store_true")
     args = p.parse_args()
     os.makedirs(args.artifact_dir, exist_ok=True)
     tp = os.path.join(args.artifact_dir, "features_train.csv")
@@ -186,7 +246,14 @@ def main():
         sys.exit(1)
     vp = os.path.join(args.artifact_dir, "features_valid.csv")
     input_paths = [tp] + ([vp] if os.path.exists(vp) else [])
-    cache_params = feature_selection_cache_params(args.max_features, n_workers=args.n_workers)
+    seeds = parse_stability_seeds(args.stability_seeds)
+    cache_params = feature_selection_cache_params(
+        args.max_features, n_workers=args.n_workers, preselect_top=args.preselect_top,
+        stability_splits=args.stability_splits, stability_seeds=seeds,
+        stability_max_rows=args.stability_max_rows,
+        permutation_repeats=args.permutation_repeats,
+        rank_only=args.rank_only,
+    )
     cache = load_feature_selection_cache(args.artifact_dir, input_paths, cache_params)
     if cache is not None:
         print(f"Feature selection cache hit: {cache['cache_key']}")
@@ -200,13 +267,33 @@ def main():
     dv = pd.read_csv(vp) if os.path.exists(vp) else dt.copy()
     fcols = get_candidate_feature_cols(dt)
     dtc, dvc, kept, _, _ = clean_features_by_train(dt, dv, fcols, missing_thresh=0.5, corr_thresh=0.95, skip_vif=True)
-    presel = fast_group_preselection(dtc, kept, preselect_top=6)
+    stability_df = limit_rows_for_stability(dtc, max_rows=args.stability_max_rows)
+    presel = fast_group_preselection(stability_df, kept, preselect_top=args.preselect_top)
     presel_cols = sorted(presel.keys())
-    stab = stability_selection(dtc, presel_cols, max_splits=min(5, dtc["sample_name"].nunique()),
-                               seeds=[1, 7, 42], n_workers=args.n_workers, min_fold_auc=0.55)
-    if not stab:
-        stab = [{"feature": f, "freq": 1.0, "avg_importance": 0.01, "avg_rank": i, "group": feature_to_group(f)}
+    print(
+        f"Stability config: features={len(presel_cols)}, rows={len(stability_df)}, "
+        f"splits<={args.stability_splits}, seeds={seeds}, workers={args.n_workers}, "
+        f"permutation_repeats={args.permutation_repeats}, rank_only={args.rank_only}"
+    )
+    if args.rank_only:
+        print("Rank-only mode: skip stability selection and use fast group preselection ranking.")
+        stab = [{"feature": f, "freq": 1.0, "avg_importance": float(presel[f].get("importance", 0.01)),
+                 "avg_rank": int(presel[f].get("rank", i + 1)), "group": feature_to_group(f)}
                 for i, f in enumerate(presel_cols)]
+    else:
+        try:
+            stab = stability_selection(
+                stability_df, presel_cols,
+                max_splits=min(int(args.stability_splits), stability_df["sample_name"].nunique()),
+                seeds=seeds, n_workers=args.n_workers, min_fold_auc=0.55,
+                permutation_repeats=args.permutation_repeats,
+            )
+        except RuntimeError as exc:
+            print(f"Stability selection skipped: {exc}")
+            stab = []
+        if not stab:
+            stab = [{"feature": f, "freq": 1.0, "avg_importance": 0.01, "avg_rank": i, "group": feature_to_group(f)}
+                    for i, f in enumerate(presel_cols)]
     for row in stab:
         row["combined_score"] = row.get("freq", 0.5) * row.get("avg_importance", 0.01)
     stab.sort(key=lambda r: r["combined_score"], reverse=True)
