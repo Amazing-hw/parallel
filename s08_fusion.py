@@ -56,7 +56,7 @@ def build_feature_matrix(df, features, fills):
         return np.empty((len(df), 0), dtype=float)
     matrix = df.reindex(columns=features)
     matrix = matrix.apply(pd.to_numeric, errors="coerce")
-    X = matrix.to_numpy(dtype=float)
+    X = np.array(matrix.to_numpy(dtype=float, copy=True), dtype=float, copy=True)
     for i, feature in enumerate(features):
         invalid = ~np.isfinite(X[:, i])
         X[invalid, i] = fills.get(feature, 0.0)

@@ -21,6 +21,8 @@ from s02_features import is_prewindowed_signal, _downsample_ppg, _is_25hz_sample
 from s04_data import load_splits, multiprocessing_context_from_env, resolve_n_workers
 
 MIN_AUTO_PARALLEL_SAMPLES = 32
+MIN_CHUNKED_MAP_SAMPLES = 200
+_THREADPOOL_LIMITER = None
 
 
 def _format_duration(seconds):
@@ -78,6 +80,28 @@ def _parallel_sample_worker(args):
     return idx, extract_sample(sample, OldLivenessModel())
 
 
+def _init_feature_worker():
+    """Limit nested BLAS/NumExpr threads inside each process-pool worker."""
+    global _THREADPOOL_LIMITER
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    try:
+        from threadpoolctl import threadpool_limits
+        _THREADPOOL_LIMITER = threadpool_limits(limits=1)
+    except Exception:
+        _THREADPOOL_LIMITER = None
+
+
+def _parallel_chunksize(total, n_workers):
+    return max(1, int(total) // max(1, int(n_workers) * 8))
+
+
+def _use_chunked_map(total, n_workers):
+    return int(n_workers) > 1 and int(total) >= MIN_CHUNKED_MAP_SAMPLES
+
+
 def write_feature_outputs(artifact_dir, split_name, df):
     """Write legacy and standard feature-pool names for the same cached rows."""
     df.to_csv(os.path.join(artifact_dir, f"features_{split_name}.csv"), index=False)
@@ -103,25 +127,38 @@ def _iter_sample_results(name, samples, model, n_workers, split_t0):
                 yield "progress", i
         return
 
-    pool_kwargs = {"max_workers": n_workers}
+    pool_kwargs = {"max_workers": n_workers, "initializer": _init_feature_worker}
     mp_ctx = multiprocessing_context_from_env()
     if mp_ctx is not None:
         pool_kwargs["mp_context"] = mp_ctx
-    print(f"[{name}] parallel workers={n_workers}", flush=True)
+    use_chunked = _use_chunked_map(total, n_workers)
+    chunksize = _parallel_chunksize(total, n_workers)
+    suffix = f", chunksize={chunksize}" if use_chunked else ""
+    print(f"[{name}] parallel workers={n_workers}{suffix}", flush=True)
     ordered = [None] * total
     done = 0
     with ProcessPoolExecutor(**pool_kwargs) as executor:
-        futures = [
-            executor.submit(_parallel_sample_worker, (idx, sample))
-            for idx, sample in enumerate(samples)
-        ]
-        for future in as_completed(futures):
-            idx, rows = future.result()
-            ordered[idx] = rows
-            done += 1
-            if done == 1 or done == total or done % interval == 0:
-                current_rows = sum(len(part) for part in ordered if part is not None)
-                _print_progress(name, done, total, split_t0, current_rows)
+        if use_chunked:
+            args_iter = ((idx, sample) for idx, sample in enumerate(samples))
+            result_iter = executor.map(_parallel_sample_worker, args_iter, chunksize=chunksize)
+            for idx, rows in result_iter:
+                ordered[idx] = rows
+                done += 1
+                if done == 1 or done == total or done % interval == 0:
+                    current_rows = sum(len(part) for part in ordered if part is not None)
+                    _print_progress(name, done, total, split_t0, current_rows)
+        else:
+            futures = [
+                executor.submit(_parallel_sample_worker, (idx, sample))
+                for idx, sample in enumerate(samples)
+            ]
+            for future in as_completed(futures):
+                idx, rows = future.result()
+                ordered[idx] = rows
+                done += 1
+                if done == 1 or done == total or done % interval == 0:
+                    current_rows = sum(len(part) for part in ordered if part is not None)
+                    _print_progress(name, done, total, split_t0, current_rows)
     for idx, rows in enumerate(ordered):
         yield idx, rows or []
 
