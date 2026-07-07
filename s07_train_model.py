@@ -5,7 +5,7 @@ S07: Train tiny independent XGBoost on ALL data.
 Output: {artifact_dir}/new_model.json, new_model_bundle.pkl
 """
 
-import argparse, json, os, sys, time
+import argparse, hashlib, json, os, platform, sys, time
 import numpy as np, pandas as pd, xgboost as xgb, joblib
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix
 
@@ -16,6 +16,43 @@ LEAKAGE_FEATURES = {
     "is_error",
     "fallback",
 }
+
+
+def sha256_head(path, head_bytes=4 * 1024 * 1024):
+    if not path or not os.path.exists(path):
+        return None
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        h.update(f.read(head_bytes))
+    return h.hexdigest()
+
+
+def build_training_fingerprint(artifact_dir, feature_pool_train_path=None, splits_path=None):
+    fingerprint = {
+        "train_time_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "numpy": np.__version__,
+        "pandas": pd.__version__,
+        "xgboost": xgb.__version__,
+        "splits_sha256_head": sha256_head(splits_path or os.path.join(os.path.dirname(artifact_dir), "splits.json")),
+        "feature_pool_train_sha256_head": sha256_head(
+            feature_pool_train_path or os.path.join(artifact_dir, "feature_pool_train.csv")
+        ),
+        "selection_policy": {
+            "selection_data": "train_only",
+            "valid_used_for_selection": False,
+            "test_used_for_selection": False,
+            "test_role": "final_closed_evaluation_only",
+        },
+    }
+    return fingerprint
+
+
+def resolve_feature_pool_path(artifact_dir, split):
+    standard = os.path.join(artifact_dir, f"feature_pool_{split}.csv")
+    legacy = os.path.join(artifact_dir, f"features_{split}.csv")
+    return standard if os.path.exists(standard) else legacy
 
 
 def resolve_feature_list(auto_path, manual_path=None):
@@ -56,9 +93,12 @@ def main():
     feats, feature_source = resolve_feature_list(
         os.path.join(args.artifact_dir, "selected_features.json"), args.manual_features
     )
-    tp = os.path.join(args.artifact_dir, "features_train.csv")
-    vp = os.path.join(args.artifact_dir, "features_valid.csv")
+    tp = resolve_feature_pool_path(args.artifact_dir, "train")
+    vp = resolve_feature_pool_path(args.artifact_dir, "valid")
     if not os.path.exists(tp): print("ERROR: train not found"); sys.exit(1)
+    fingerprint = build_training_fingerprint(args.artifact_dir, tp)
+    with open(os.path.join(args.artifact_dir, "model_fingerprint.json"), "w", encoding="utf-8") as f:
+        json.dump(fingerprint, f, indent=2, ensure_ascii=False)
     dt = pd.read_csv(tp); dv = pd.read_csv(vp) if os.path.exists(vp) else dt.copy()
     if "fallback" in dt.columns: dt = dt[dt["fallback"] == 0]
     if "fallback" in dv.columns: dv = dv[dv["fallback"] == 0]
@@ -88,9 +128,11 @@ def main():
     model.get_booster().save_model(os.path.join(args.artifact_dir, "new_model.json"))
     cfg = {"n_estimators": args.n_estimators, "max_depth": args.max_depth, "n_nodes": nn,
            "feature_source": feature_source,
+           "fingerprint": fingerprint,
            "selected_features": feats, "threshold": float(thr),
            "fill_values": {k: float(v) for k, v in fills.items()}, "train_metrics": tm, "valid_metrics": vm}
-    joblib.dump({"model": model, "selected_features": feats, "threshold": thr, "fill_values": fills, "config": cfg},
+    joblib.dump({"model": model, "selected_features": feats, "threshold": thr, "fill_values": fills,
+                 "fingerprint": fingerprint, "config": cfg},
                 os.path.join(args.artifact_dir, "new_model_bundle.pkl"))
     print(f"Done ({time.time()-t0:.1f}s)")
 

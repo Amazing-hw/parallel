@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
@@ -37,6 +38,13 @@ LEAKAGE_AND_META_COLUMNS = {
 
 
 SELECTION_CACHE_VERSION = 1
+
+
+def resolve_feature_pool_path(artifact_dir, split):
+    """Prefer standard feature_pool_*.csv, fall back to legacy features_*.csv."""
+    standard = Path(artifact_dir) / f"feature_pool_{split}.csv"
+    legacy = Path(artifact_dir) / f"features_{split}.csv"
+    return standard if standard.exists() else legacy
 
 
 def get_candidate_feature_cols(df):
@@ -240,11 +248,11 @@ def main():
     p.add_argument("--rank_only", action="store_true")
     args = p.parse_args()
     os.makedirs(args.artifact_dir, exist_ok=True)
-    tp = os.path.join(args.artifact_dir, "features_train.csv")
+    tp = str(resolve_feature_pool_path(args.artifact_dir, "train"))
     if not os.path.exists(tp):
         print(f"ERROR: {tp} not found")
         sys.exit(1)
-    vp = os.path.join(args.artifact_dir, "features_valid.csv")
+    vp = str(resolve_feature_pool_path(args.artifact_dir, "valid"))
     input_paths = [tp] + ([vp] if os.path.exists(vp) else [])
     seeds = parse_stability_seeds(args.stability_seeds)
     cache_params = feature_selection_cache_params(

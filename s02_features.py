@@ -143,6 +143,43 @@ _REDUNDANT_FEATURES = {
     #    只是最终特征池中优先保留更鲁棒的 AC_MAD / |DC| 等价信息。--
 }
 
+# 低可解释性特征：这些量通常难以用“绿光稳定性 / 三通道一致性 / 环境光泄漏 /
+# ACC 运动强度”直接解释，且在汇报和部署排查时成本较高。新增 Stage2 模型只从
+# 可解释候选池中选特征，商用 s01_model.py 的 8 个特征和树参数不受影响。
+_EXPLAINABILITY_BLOCKED_EXACT = {
+    "G_MIN_CHANNEL_ID",
+    "G_DROPOUT_ANGLE",
+    "G_TOP2_CHANNEL_COUNT",
+    "G_TOP2_WORST_IDX",
+    "G_SPATIAL_STABILITY_SCORE",
+    "G_TOP2_RANK_STABILITY",
+    "G_TOP2_SWITCH_RATE",
+    "corr_Gmean_vmag",
+    "corr_Ambient_vmag",
+    "ACC_STILL_X_GREEN_STABILITY",
+    "ACC_DIFF_TO_GTOP2_DIFF_RATIO",
+    "ACC_STILL_GREEN_MISMATCH",
+}
+
+_EXPLAINABILITY_BLOCKED_PATTERNS = (
+    "_Entropy_",
+    "_Hjorth_",
+    "_bp_skewness",
+    "_bp_kurtosis",
+    "spatial_vmag",
+    "SPATIAL_VMAG",
+    "FFT_peak_width",
+    "FFT_SNR",
+    "harmonic_",
+)
+
+
+def is_explainable_stage2_feature(name):
+    """Return True for feature names that are suitable for explainable Stage2 use."""
+    if name in _EXPLAINABILITY_BLOCKED_EXACT:
+        return False
+    return not any(pattern in name for pattern in _EXPLAINABILITY_BLOCKED_PATTERNS)
+
 # =========================================================
 # H5 读取与 Stage1 工具
 # =========================================================
@@ -626,10 +663,19 @@ DEPLOYMENT_ALLOWED_FFT_FEATURES = {
     "AMBX_DOM_FREQ",
 }
 
+DEPLOYMENT_ALLOWED_NON_FFT_FEATURES = {
+    name for name in DEPLOYMENT_ALLOWED_NON_FFT_FEATURES
+    if is_explainable_stage2_feature(name)
+}
+DEPLOYMENT_ALLOWED_FFT_FEATURES = {
+    name for name in DEPLOYMENT_ALLOWED_FFT_FEATURES
+    if is_explainable_stage2_feature(name)
+}
+
 
 def is_deployment_friendly_stage2_feature(name):
-    """All features pass — s03 uses only C-friendly numpy operations."""
-    return True
+    """Return True for Stage2 features that are both deployment-practical and explainable."""
+    return is_explainable_stage2_feature(name)
 
 
 def filter_deployment_friendly_stage2_features(features):
@@ -2424,7 +2470,7 @@ def extract_feature_pool_from_window(ir, ambient, g1, g2, g3, fs=25, return_prep
     feat["GREEN_INVALID_COUNT"] = float(_invalid_green)
 
     for k in list(feat.keys()):
-        if k in _REDUNDANT_FEATURES:
+        if k in _REDUNDANT_FEATURES or not is_explainable_stage2_feature(k):
             del feat[k]
             continue
         v = feat[k]

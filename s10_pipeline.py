@@ -113,6 +113,30 @@ def split_timing_record(elapsed, split_result):
     }
 
 
+def parse_skip_tokens(values):
+    tokens = set()
+    for value in values or []:
+        for part in str(value).replace(";", ",").split(","):
+            token = part.strip().lower()
+            if token:
+                tokens.add(token)
+    return tokens
+
+
+def should_skip_step(desc, script, skip_tokens):
+    if not skip_tokens:
+        return False
+    script_name = os.path.basename(script).lower()
+    script_stem = os.path.splitext(script_name)[0]
+    desc_norm = str(desc).lower().replace("-", " ")
+    aliases = {script_name, script_stem}
+    for part in desc_norm.split():
+        aliases.add(part)
+    if desc_norm.startswith("s"):
+        aliases.add(desc_norm.split()[0])
+    return any(token in aliases for token in skip_tokens)
+
+
 def main():
     d = os.path.dirname(os.path.abspath(__file__))
     p = argparse.ArgumentParser(description="Standalone parallel pipeline")
@@ -139,7 +163,11 @@ def main():
     p.add_argument("--min_veto_ratio", type=float, default=0.4)
     p.add_argument("--manual_features", default=None)
     p.add_argument("--explain", action="store_true")
+    p.add_argument("--feature_report", action="store_true",
+                   help="Generate S13 feature-pool explainability report from feature_pool_test.csv")
     p.add_argument("--plot_mode", default="full", choices=["basic", "full"])
+    p.add_argument("-skip", "--skip", action="append", default=[],
+                   help="Skip pipeline stages by stage id or script name, e.g. -skip s06 or --skip s06,s11_explain.py")
     p.add_argument("--max_samples", type=int, default=None)
     p.add_argument("--eval_split", default="test")
     p.add_argument("--dry_run", action="store_true")
@@ -198,8 +226,16 @@ def main():
             "--artifact_dir", paths["artifact_dir"], "--split", args.eval_split,
             "--plot_mode", args.plot_mode,
         ]))
+    if args.feature_report:
+        steps.append(("S13-Feature report", os.path.join(d, "s13_feature_report.py"), [
+            "--artifact_dir", paths["artifact_dir"],
+        ]))
 
+    skip_tokens = parse_skip_tokens(args.skip)
     for desc, script, step_args in steps:
+        if should_skip_step(desc, script, skip_tokens):
+            print(f"[DRY RUN] SKIP {desc}" if args.dry_run else f"[SKIP] {desc}")
+            continue
         if args.dry_run:
             print(f"[DRY RUN] {script} {' '.join(step_args)}")
         else:

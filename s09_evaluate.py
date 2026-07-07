@@ -16,6 +16,12 @@ from s02_features import is_prewindowed_signal, _downsample_ppg, _is_25hz_sample
 from s04_data import load_splits
 
 
+def resolve_feature_pool_path(artifact_dir, split):
+    standard = os.path.join(artifact_dir, f"feature_pool_{split}.csv")
+    legacy = os.path.join(artifact_dir, f"features_{split}.csv")
+    return standard if os.path.exists(standard) else legacy
+
+
 def _to_25hz(s, ppg, acc):
     if _is_25hz_sample(s): return (np.asarray(ppg, dtype=np.float64),
         np.asarray(acc, dtype=np.float64) if acc is not None and len(acc) > 0 else None, 25)
@@ -266,7 +272,7 @@ def main():
     with open(os.path.join(args.artifact_dir, "fusion_config.json")) as f: fcfg = json.load(f)
     strat = fcfg["chosen_strategy"]; vp = fcfg.get("veto_params", {})
     t0 = time.time(); results = []
-    feature_path = os.path.join(args.artifact_dir, f"features_{args.split}.csv")
+    feature_path = resolve_feature_pool_path(args.artifact_dir, args.split)
     if os.path.exists(feature_path):
         print(f"Using cached features: {feature_path}")
         results = evaluate_cached_feature_rows(

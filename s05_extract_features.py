@@ -78,6 +78,12 @@ def _parallel_sample_worker(args):
     return idx, extract_sample(sample, OldLivenessModel())
 
 
+def write_feature_outputs(artifact_dir, split_name, df):
+    """Write legacy and standard feature-pool names for the same cached rows."""
+    df.to_csv(os.path.join(artifact_dir, f"features_{split_name}.csv"), index=False)
+    df.to_csv(os.path.join(artifact_dir, f"feature_pool_{split_name}.csv"), index=False)
+
+
 def _resolve_s05_workers(n_workers, total):
     if n_workers is None:
         if total < MIN_AUTO_PARALLEL_SAMPLES:
@@ -130,7 +136,7 @@ def _run_split(name, samples, model, artifact_dir, n_workers=1):
         else:
             rows.extend(result)
     df = pd.DataFrame(rows)
-    df.to_csv(os.path.join(artifact_dir, f"features_{name}.csv"), index=False)
+    write_feature_outputs(artifact_dir, name, df)
     elapsed = time.time() - split_t0
     print(f"[{name}] {len(df)} rows, elapsed={_format_duration(elapsed)}")
     return {

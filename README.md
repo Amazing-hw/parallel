@@ -67,11 +67,20 @@ python s10_pipeline.py --dataset_dir path\to\dataset --guard_mode shadow
 python s10_pipeline.py --dataset_dir path\to\dataset --guard_mode shadow --explain
 ```
 
+需要额外生成特征池可解释性汇报图时再加：
+
+```bash
+python s10_pipeline.py --dataset_dir path\to\dataset --guard_mode shadow --feature_report
+```
+
 运行结束后先看这几个文件：
 
 ```text
 artifacts/parallel/commercial_model_manifest.json
 artifacts/parallel/features_train.csv
+artifacts/parallel/feature_pool_train.csv
+artifacts/parallel/model_fingerprint.json
+artifacts/parallel/feature_report/
 artifacts/parallel/evaluation_report.json
 artifacts/parallel/evaluation_comparison.csv
 artifacts/parallel/feature_review/ranked_features.md
@@ -94,7 +103,8 @@ artifacts/parallel/deploy_export/
 
 - `commercial_pred`：只依赖原商用模型的结果。
 - `parallel_pred`：商用模型旁边增加并联风险模型后的完整方案结果。
-- `features_*.csv`：并联方案的核心数据资产，保存商用输出和新增 PPG/ACC 特征。
+- `feature_pool_*.csv`：并联方案的标准窗口级特征池缓存，保存商用输出和新增 PPG/ACC 特征。
+- `features_*.csv`：兼容旧流程的同内容文件；新脚本会优先读取 `feature_pool_*.csv`，不存在时再回退到 `features_*.csv`。
 - `shadow`：只记录风险，不改变最终输出。
 - `fusion_config.json`：记录并联模型如何参与风险复核。
 - `commercial_model_manifest.json`：证明商用特征和模型参数没有被修改。
@@ -174,7 +184,7 @@ flowchart LR
     end
 
     subgraph Added["新增并联部分：独立风险评估"]
-        F["features_*.csv"]
+        F["feature_pool_*.csv<br/>兼容 features_*.csv"]
         G["selected_features.json"]
         H["new_model_bundle.pkl"]
         I["fusion_config.json"]
@@ -223,7 +233,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["第一次运行 pipeline"] --> B["生成 features_*.csv"]
+    A["第一次运行 pipeline"] --> B["生成 feature_pool_*.csv<br/>和 features_*.csv"]
     B --> C["生成 feature_review/ranked_features.*"]
     C --> D["人工查看排序、稳定性、业务可解释性"]
     D --> E["编辑 manual_feature_selection.json"]
@@ -247,7 +257,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["splits.json<br/>固定数据划分"] --> B["features_*.csv<br/>商用输出 + 新增特征"]
+    A["splits.json<br/>固定数据划分"] --> B["feature_pool_*.csv<br/>商用输出 + 新增特征"]
     B --> C["feature_review/ranked_features.*"]
     C --> D["selected_features.json<br/>或 manual_feature_selection.json"]
     D --> E["new_model_bundle.pkl<br/>并联模型部署核心文件"]
@@ -263,6 +273,9 @@ flowchart TD
 ```text
 commercial_model_manifest.json
 splits.json
+feature_pool_train.csv
+feature_pool_valid.csv
+feature_pool_test.csv
 features_train.csv
 features_valid.csv
 features_test.csv
@@ -494,6 +507,24 @@ PPG/ACC 特征提取模块。
 - 部署友好特征白名单。
 - 特征池生成工具。
 
+新增特征池当前采用“可解释性优先”的过滤策略。绿光 PPG 会先形成三路输入 `g1/g2/g3`：普通三绿光数据直接取三个绿光通道；多路绿光数据会按同一物理位置的多颗绿光求平均，合并成 3 个方位通道。后续新增模型主要使用以下几类容易解释的特征：
+
+- 绿光强度和稳定性：例如 `G_mean_mean`、`GREEN_AC_MAD`、`GREEN_AC_DC_RATIO`、`GREEN_SEG_ACDC_CV`。
+- 三通道一致性：例如 `G_ch_dc_cv`、`GCH_DC_RANGE_RATIO`、`GCH_AC_RANGE_RATIO`、`G_2OF3_AC_SUPPORT`、`G_TOP2_CORR_MIN`。
+- TOP2 绿光聚合：用三通道中 AC 更好的两路形成稳健绿光，保留 `GTOP2_AC_MAD`、`GTOP2_AC_DC_RATIO`、`GTOP2_SEG_ACDC_CV` 等。
+- 环境光关系：例如 `AMB_AC_TO_GREEN_AC`、`AMB_DC_TO_GREEN_DC`、`GREEN_AMB_BP_CORR`、`GREEN_AMB_LEAK`，用于解释“外界光泄漏/遮挡变化”。
+- ACC 运动强度：例如 `ACC_MAG_STD`、`ACC_DIFF_MAD`、`ACC_STILL_SCORE`、`ACC_GREEN_BP_CORR`，用于解释“静止/运动与 PPG 是否匹配”。
+
+为了让后续树模型和汇报材料更容易解释，当前会从新增候选池和部署白名单中剔除以下特征族：
+
+- 熵类和 Hjorth 类：如 `*_Entropy_*`、`*_Hjorth_*`，数学含义偏抽象，不利于业务解释。
+- 偏度/峰度类：如 `*_bp_skewness`、`*_bp_kurtosis`，对异常波形敏感，阈值不好解释。
+- 空间向量几何类：如 `G_spatial_vmag_*`、`G_SPATIAL_VMAG_RANGE`，三通道合并后更推荐用通道差异、相关性和支持数解释。
+- 硬件编号/角度类：如 `G_MIN_CHANNEL_ID`、`G_DROPOUT_ANGLE`、`G_TOP2_WORST_IDX`，容易绑定设备布局。
+- 复合打分类：如 `G_SPATIAL_STABILITY_SCORE`、`ACC_STILL_GREEN_MISMATCH`，由多个概念相乘或相除，难以在上线评审中解释单一物理意义。
+
+人工选择特征时，建议优先选择能用一句话解释的特征，例如“绿光 AC/DC 太低”“三通道只有 1 路支持”“环境光和绿光同步泄漏”“ACC 很静止但 PPG 不稳定”。如果一个特征必须依赖复杂数学概念才能解释，即使排序靠前，也不建议进入最终小 XGBoost。
+
 当前 Stage1 默认阈值：
 
 ```text
@@ -544,6 +575,9 @@ artifacts/parallel/commercial_model_manifest.json
 artifacts/parallel/features_train.csv
 artifacts/parallel/features_valid.csv
 artifacts/parallel/features_test.csv
+artifacts/parallel/feature_pool_train.csv
+artifacts/parallel/feature_pool_valid.csv
+artifacts/parallel/feature_pool_test.csv
 ```
 
 ### `s06_select_features.py`
@@ -556,7 +590,7 @@ artifacts/parallel/features_test.csv
 - 自动排除标签、预测结果和泄漏字段。
 - 输出 ranked feature 和人工选择模板。
 - 支持 `--n_workers`，会传入底层稳定性选择的 fold 任务；运行时会打印每个 fold 的进度。
-- 支持输入哈希缓存。若 `features_train.csv`、`features_valid.csv` 和关键参数未变化，会直接复用 `selected_features.json` 与 `feature_review/`，跳过耗时的稳定性选择。
+- 支持输入哈希缓存。若 `feature_pool_train.csv`、`feature_pool_valid.csv` 和关键参数未变化，会直接复用 `selected_features.json` 与 `feature_review/`，跳过耗时的稳定性选择；旧的 `features_*.csv` 仍作为兜底兼容。
 - 默认采用快速筛选配置：`--preselect_top 4 --stability_splits 4 --stability_seeds 1,7 --stability_max_rows 5000`。它参考了 `new_new` 的加速思路，先压缩候选特征和训练行数，再做稳定性选择。
 - 支持 `--rank_only`，只做特征清洗、组内预筛和排序报告，不跑稳定性选择。这个模式适合先快速得到 `ranked_features.csv`，再由人工决定哪些特征可用于训练。
 - 支持 `--permutation_repeats` 控制稳定性选择中 permutation importance 的重复次数。默认 `3` 更稳，快速探索可设为 `1`。
@@ -713,7 +747,21 @@ README_DEPLOY.md
 deploy_manifest.json
 ```
 
-`method.json` 是核心方法配置，包含特征顺序、缺失值填充值、阈值、guard 模式、并联 fusion/veto 策略和商用模型冻结信息。
+`method.json` 是核心方法配置，包含特征顺序、缺失值填充值、阈值、guard 模式、训练 fingerprint、并联 fusion/veto 策略和商用模型冻结信息。
+
+### `s13_feature_report.py`
+
+特征池可解释性报告脚本。它只读取 `feature_pool_test.csv` 和 `selected_features.json`，不参与训练或调参，适合整理汇报材料。
+
+输出：
+
+```text
+artifacts/parallel/feature_report/feature_auc_ranking.csv
+artifacts/parallel/feature_report/feature_auc_ranking.png
+artifacts/parallel/feature_report/pca_2d.png
+artifacts/parallel/feature_report/selected_feature_correlation.png
+artifacts/parallel/feature_report/feature_report_summary.json
+```
 
 ## 8. 快速运行
 
@@ -758,6 +806,15 @@ python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --guard_mode sh
 ```bash
 python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --guard_mode shadow --explain --plot_mode basic
 ```
+
+如果某一步产物已经存在，可以用 `-skip` 或 `--skip` 跳过指定阶段。支持阶段号、脚本名和逗号分隔写法：
+
+```bash
+python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --guard_mode shadow -skip s06
+python s10_pipeline.py --dataset_dir D:\wearing_liveness\dataset --guard_mode shadow --explain --skip s06,s11_explain.py
+```
+
+注意：跳过某阶段前要确认后续阶段依赖的产物已经存在。例如跳过 `S06` 时，应已有 `selected_features.json`；跳过 `S05` 时，应已有 `feature_pool_train.csv`、`feature_pool_valid.csv` 和 `feature_pool_test.csv`，或旧版兼容文件 `features_train.csv`、`features_valid.csv`、`features_test.csv`。
 
 如果要离线做更充分的排序复核，可以恢复旧的严格配置：
 
@@ -889,11 +946,28 @@ fallback
 
 商用模型冻结证据。用于确认商用模型参数、特征名和树结构哈希没有变化。
 
-### `features_*.csv`
+### `model_fingerprint.json`
 
-并联模型的窗口级特征池。包含商用输出、新增 PPG/ACC 特征、样本名、标签和窗口位置。
+新增并联模型的训练来源记录。包含训练时间、Python/numpy/pandas/xgboost 版本、`splits.json` 的 SHA256 摘要、`feature_pool_train.csv` 的 SHA256 摘要，以及 `test_used_for_selection=false` 的数据使用策略。部署导出时会一起写入 `method.json` 并拷贝到 `deploy_export/`。
 
-这些文件不仅用于特征排序和训练，也会被 `s09_evaluate.py` 优先复用，以缩短重复评估时间。
+### `feature_pool_*.csv` 和 `features_*.csv`
+
+并联模型的窗口级特征池缓存。包含商用输出、新增 PPG/ACC 特征、样本名、标签和窗口位置。
+
+`S05` 会同时写出两套文件名：
+
+- `feature_pool_train.csv`、`feature_pool_valid.csv`、`feature_pool_test.csv`：推荐的新标准名。
+- `features_train.csv`、`features_valid.csv`、`features_test.csv`：兼容旧脚本和旧产物。
+
+后续 `S06` 特征选择、`S07` 训练、`S08` 融合和 `S09` 评估都会优先读取 `feature_pool_*.csv`；如果不存在，再回退读取 `features_*.csv`。因此只要 `feature_pool_*.csv` 已经存在，重复调参时可以用 `-skip s05` 跳过最耗时的 H5 读取和特征抽取。
+
+### `feature_report/`
+
+特征池解释性报告。重点看：
+
+- `feature_auc_ranking.csv/png`：单特征区分度排序。
+- `pca_2d.png`：测试集样本在特征空间中的二维分布。
+- `selected_feature_correlation.png`：入选特征之间的相关性，辅助判断是否过度依赖重复信息。
 
 ### `feature_review/`
 
@@ -1064,6 +1138,9 @@ artifacts/parallel/commercial_model_manifest.json
 artifacts/parallel/features_train.csv
 artifacts/parallel/features_valid.csv
 artifacts/parallel/features_test.csv
+artifacts/parallel/feature_pool_train.csv
+artifacts/parallel/feature_pool_valid.csv
+artifacts/parallel/feature_pool_test.csv
 ```
 
 用途：
@@ -1270,7 +1347,7 @@ fallback
 
 - `ranked_features.md`：排序靠前的特征是否符合业务直觉。
 - `ranked_features.csv`：训练集和验证集表现是否一致。
-- `features_*.csv`：特征是否在不同 split 上分布稳定。
+- `feature_pool_*.csv`：特征是否在不同 split 上分布稳定；旧版 `features_*.csv` 可作为兼容参考。
 - `fusion_config.json`：并联模型参与 veto 后是否改善风险。
 - `evaluation_comparison.csv`：完整方案有没有修复商用错误，同时有没有引入新错误。
 - `tree_export/`：树结构是否过度依赖单一特征或异常阈值。
@@ -1283,6 +1360,9 @@ fallback
 ```text
 commercial_model_manifest.json
 splits.json
+feature_pool_train.csv
+feature_pool_valid.csv
+feature_pool_test.csv
 features_train.csv
 features_valid.csv
 features_test.csv

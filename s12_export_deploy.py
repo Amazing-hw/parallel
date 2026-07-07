@@ -194,6 +194,7 @@ def build_method(artifact_dir, bundle, model_config, fusion_config):
             "final_decision_rule": "default shadow keeps commercial_pred; hard_veto can reject commercial-positive samples when new-model risk is persistent",
         },
         "training_config": sanitize_config(model_config),
+        "fingerprint": sanitize_config(model_config.get("fingerprint", {})),
         "fusion_config": sanitize_config(fusion_config),
     }
     return method
@@ -211,6 +212,7 @@ def export_deploy_package(artifact_dir, output_dir=None):
     selected_path = require_file(os.path.join(artifact_dir, "selected_features.json"))
     manifest_path = require_file(os.path.join(artifact_dir, "commercial_model_manifest.json"))
     fusion_path = require_file(os.path.join(artifact_dir, "fusion_config.json"))
+    fingerprint_path = os.path.join(artifact_dir, "model_fingerprint.json")
     feature_script = require_file(os.path.join(project_dir, "s02_features.py"))
     commercial_script = require_file(os.path.join(project_dir, "s01_model.py"))
 
@@ -222,6 +224,8 @@ def export_deploy_package(artifact_dir, output_dir=None):
     write_json(os.path.join(output_dir, "model.json"), sanitize_config(read_json(model_path)))
     shutil.copyfile(selected_path, os.path.join(output_dir, "selected_features.json"))
     shutil.copyfile(manifest_path, os.path.join(output_dir, "commercial_model_manifest.json"))
+    if os.path.exists(fingerprint_path):
+        shutil.copyfile(fingerprint_path, os.path.join(output_dir, "model_fingerprint.json"))
     shutil.copyfile(feature_script, os.path.join(output_dir, "feature_extractor.py"))
     shutil.copyfile(feature_script, os.path.join(output_dir, "s02_features.py"))
     shutil.copyfile(commercial_script, os.path.join(output_dir, "commercial_model.py"))

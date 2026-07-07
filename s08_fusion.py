@@ -17,6 +17,12 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 from s01_model import DETECT_TREE_THRESH
 
 
+def resolve_feature_pool_path(artifact_dir, split):
+    standard = os.path.join(artifact_dir, f"feature_pool_{split}.csv")
+    legacy = os.path.join(artifact_dir, f"features_{split}.csv")
+    return standard if os.path.exists(standard) else legacy
+
+
 def score_to_prob(score):
     if score is None or not np.isfinite(score):
         return 1.0
@@ -94,7 +100,7 @@ def main():
     fills = bundle["fill_values"]
     new_thr = bundle["threshold"]
 
-    vp = os.path.join(args.artifact_dir, "features_valid.csv")
+    vp = resolve_feature_pool_path(args.artifact_dir, "valid")
     if not os.path.exists(vp):
         print("ERROR: valid features not found")
         return
