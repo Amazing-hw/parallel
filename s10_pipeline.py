@@ -148,6 +148,7 @@ def main():
     p.add_argument("--random_state", type=int, default=42)
     p.add_argument("--n_workers", type=int, default=None)
     p.add_argument("--force_split", action="store_true")
+    p.add_argument("--min_features", type=int, default=4)
     p.add_argument("--max_features", type=int, default=12)
     p.add_argument("--preselect_top", type=int, default=4)
     p.add_argument("--stability_splits", type=int, default=4)
@@ -198,6 +199,7 @@ def main():
     select_args = [
         "--artifact_dir", paths["artifact_dir"],
         "--max_features", str(args.max_features),
+        "--min_features", str(args.min_features),
         "--preselect_top", str(args.preselect_top),
         "--stability_splits", str(args.stability_splits),
         "--stability_seeds", args.stability_seeds,
@@ -209,6 +211,8 @@ def main():
     if args.n_workers is not None:
         select_args += ["--n_workers", str(args.n_workers)]
     train_args = ["--artifact_dir", paths["artifact_dir"], "--n_estimators", str(args.n_estimators), "--max_depth", str(args.max_depth)]
+    if args.n_workers is not None:
+        train_args += ["--n_jobs", str(args.n_workers)]
     if args.manual_features:
         train_args += ["--manual_features", _abs_path(args.manual_features, d)]
     steps = [

@@ -99,10 +99,14 @@ def resolve_n_workers(n_workers=None, n_items=None, cap=4):
 
 
 def multiprocessing_context_from_env():
-    """Return an mp context when WL_MP_START_METHOD is set, otherwise default."""
-    method = os.environ.get("WL_MP_START_METHOD", "").strip()
-    if not method:
-        return None
+    """Return a process start context that avoids POSIX fork deadlocks.
+
+    Linux/macOS default to fork, which can hang after importing HDF5,
+    OpenMP-backed NumPy/SciPy, or XGBoost. Spawn is slower to start but
+    much more reliable for these batch scripts. WL_MP_START_METHOD can
+    still override this for controlled experiments.
+    """
+    method = os.environ.get("WL_MP_START_METHOD", "").strip().lower() or "spawn"
     import multiprocessing as mp
     return mp.get_context(method)
 
@@ -2764,6 +2768,7 @@ def extract_features_for_split(samples,
         mp_ctx = multiprocessing_context_from_env()
         if mp_ctx is not None:
             pool_kwargs["mp_context"] = mp_ctx
+        print(f"  feature extraction process pool: workers={n_workers}, mp_start={mp_ctx.get_start_method()}", flush=True)
         with ProcessPoolExecutor(**pool_kwargs) as ex:
             futures = {ex.submit(_worker_extract, a): i for i, a in enumerate(args_list)}
             total = len(futures)

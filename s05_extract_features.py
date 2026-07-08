@@ -134,7 +134,7 @@ def _iter_sample_results(name, samples, model, n_workers, split_t0):
     use_chunked = _use_chunked_map(total, n_workers)
     chunksize = _parallel_chunksize(total, n_workers)
     suffix = f", chunksize={chunksize}" if use_chunked else ""
-    print(f"[{name}] parallel workers={n_workers}{suffix}", flush=True)
+    print(f"[{name}] parallel workers={n_workers}, mp_start={mp_ctx.get_start_method()}{suffix}", flush=True)
     ordered = [None] * total
     done = 0
     with ProcessPoolExecutor(**pool_kwargs) as executor:

@@ -114,7 +114,124 @@ def print_confusion_matrix(title, metrics):
     print(f"  true_1      {int(c['FN']):6d}  {int(c['TP']):6d}")
 
 
+ERROR_SAMPLE_COLUMNS = [
+    "sample_name", "target", "commercial_pred", "final_pred",
+    "commercial_wrong", "final_wrong", "change_type", "guard_action",
+    "decision_source", "guard_mode", "fallback", "veto_risk", "risk_count",
+    "window_count", "risk_ratio",
+]
+
+
+def _prediction_audit_rows(results, final_key):
+    rows = []
+    for r in results:
+        target = int(r.get("target", 0))
+        commercial_pred = int(r.get("commercial_pred", 0))
+        final_pred = int(r.get(final_key, commercial_pred))
+        commercial_wrong = commercial_pred != target
+        final_wrong = final_pred != target
+        if final_wrong and commercial_wrong:
+            change_type = "still_wrong"
+        elif final_wrong:
+            change_type = "broken_by_full_scheme"
+        elif commercial_wrong:
+            change_type = "fixed_by_full_scheme"
+        else:
+            change_type = "correct"
+        rows.append({
+            "sample_name": r.get("sample_name", ""),
+            "target": target,
+            "commercial_pred": commercial_pred,
+            "final_pred": final_pred,
+            "commercial_wrong": bool(commercial_wrong),
+            "final_wrong": bool(final_wrong),
+            "change_type": change_type,
+            "guard_action": r.get("guard_action", ""),
+            "decision_source": r.get("decision_source", ""),
+            "guard_mode": r.get("guard_mode", ""),
+            "fallback": bool(r.get("fallback", False)),
+            "veto_risk": r.get("veto_risk", ""),
+            "risk_count": r.get("risk_count", ""),
+            "window_count": r.get("window_count", ""),
+            "risk_ratio": r.get("risk_ratio", ""),
+        })
+    return rows
+
+
+def write_error_sample_outputs(artifact_dir, results, final_key):
+    rows = _prediction_audit_rows(results, final_key)
+    audit = pd.DataFrame(rows, columns=ERROR_SAMPLE_COLUMNS)
+    audit[audit["final_wrong"] == True].to_csv(
+        os.path.join(artifact_dir, "evaluation_error_samples.csv"), index=False
+    )
+    audit[audit["change_type"] == "fixed_by_full_scheme"].to_csv(
+        os.path.join(artifact_dir, "evaluation_fixed_samples.csv"), index=False
+    )
+    audit.to_csv(os.path.join(artifact_dir, "evaluation_prediction_audit.csv"), index=False)
+
+
 GUARD_MODES = ("bypass", "shadow", "soft_guard", "hard_veto")
+
+
+def _row_pred_for_guard_mode(row, mode, min_veto_windows=2, min_veto_ratio=0.4):
+    commercial_pred = int(row.get("commercial_pred", 0))
+    if mode in {"bypass", "shadow", "soft_guard"} or commercial_pred == 0:
+        return commercial_pred
+    risk_count = int(row.get("risk_count", 0) or 0)
+    risk_ratio = float(row.get("risk_ratio", 0.0) or 0.0)
+    if risk_count >= int(min_veto_windows) and risk_ratio >= float(min_veto_ratio):
+        return 0
+    return commercial_pred
+
+
+def evaluate_all_guard_modes_from_rows(rows, pred_key="parallel_pred", min_veto_windows=2, min_veto_ratio=0.4):
+    results = {}
+    y_true = [int(r.get("target", 0)) for r in rows]
+    commercial_pred = [int(r.get("commercial_pred", 0)) for r in rows]
+    for mode in GUARD_MODES:
+        y_pred = [_row_pred_for_guard_mode(r, mode, min_veto_windows, min_veto_ratio) for r in rows]
+        metrics = metric(y_true, y_pred) if rows else metric([], [])
+        disagreements = [i for i, (c, p) in enumerate(zip(commercial_pred, y_pred)) if c != p]
+        fixed = sum(1 for i in disagreements if y_pred[i] == y_true[i] and commercial_pred[i] != y_true[i])
+        broken = sum(1 for i in disagreements if commercial_pred[i] == y_true[i] and y_pred[i] != y_true[i])
+        results[mode] = {
+            "metrics": metrics,
+            "n_disagreements": int(len(disagreements)),
+            "fixed": int(fixed),
+            "broken": int(broken),
+        }
+    return results
+
+
+def write_guard_mode_comparison(artifact_dir, rows, pred_key="parallel_pred", min_veto_windows=2, min_veto_ratio=0.4):
+    comparison = evaluate_all_guard_modes_from_rows(
+        rows,
+        pred_key=pred_key,
+        min_veto_windows=min_veto_windows,
+        min_veto_ratio=min_veto_ratio,
+    )
+    out_rows = []
+    for mode, payload in comparison.items():
+        metrics = payload["metrics"]
+        out_rows.append({
+            "guard_mode": mode,
+            "n": metrics["n"],
+            "accuracy": metrics["accuracy"],
+            "precision": metrics["precision"],
+            "recall": metrics["recall"],
+            "f1": metrics["f1"],
+            "TN": metrics["confusion"]["TN"],
+            "FP": metrics["confusion"]["FP"],
+            "FN": metrics["confusion"]["FN"],
+            "TP": metrics["confusion"]["TP"],
+            "n_disagreements": payload["n_disagreements"],
+            "fixed": payload["fixed"],
+            "broken": payload["broken"],
+        })
+    pd.DataFrame(out_rows).to_csv(os.path.join(artifact_dir, "evaluation_guard_modes.csv"), index=False)
+    with open(os.path.join(artifact_dir, "evaluation_guard_modes.json"), "w", encoding="utf-8") as f:
+        json.dump(comparison, f, indent=2)
+    return comparison
 
 
 def _summarize_risks(veto_risks, veto_threshold):
@@ -245,13 +362,19 @@ def write_evaluation_outputs(artifact_dir, split, strat, guard_mode, min_veto_wi
     print(f"Parallel:   acc={pm['accuracy']:.4f} prec={pm['precision']:.4f} rec={pm['recall']:.4f} f1={pm['f1']:.4f}")
     print_confusion_matrix("Parallel final", pm)
     print(f"Disagreements: {len(disc)}/{len(results)} (fixed={fixed}, broken={broken})")
+    guard_mode_comparison = write_guard_mode_comparison(
+        artifact_dir, results, pred_key="parallel_pred",
+        min_veto_windows=min_veto_windows, min_veto_ratio=min_veto_ratio,
+    )
     report = {"split": split, "n": len(results), "fusion": strat, "guard_mode": guard_mode,
               "min_veto_windows": min_veto_windows, "min_veto_ratio": min_veto_ratio,
               "commercial": cm, "parallel": pm,
+              "guard_mode_comparison": guard_mode_comparison,
               "bypass": cm, "n_disagreements": len(disc), "fixed": fixed, "broken": broken}
     with open(os.path.join(artifact_dir, "evaluation_report.json"), "w") as f:
         json.dump(report, f, indent=2)
     pd.DataFrame(results).to_csv(os.path.join(artifact_dir, "evaluation_samples.csv"), index=False)
+    write_error_sample_outputs(artifact_dir, results, "parallel_pred")
     pd.DataFrame([{"metric": m, "commercial": cm[m], "parallel": pm[m], "delta": pm[m] - cm[m]}
                   for m in ["accuracy", "precision", "recall", "f1"]])\
       .to_csv(os.path.join(artifact_dir, "evaluation_comparison.csv"), index=False)

@@ -81,10 +81,25 @@ def get_inner_n_jobs(default=1):
         return max(1, int(default))
 
 
+def resolve_stability_parallel_plan(n_workers=None, n_tasks=0):
+    """Return the effective stability-selection multiprocessing decision."""
+    if int(n_tasks) <= 4:
+        return {"n_workers": 1, "use_mp": False, "reason": "too_few_fold_tasks"}
+    resolved = resolve_n_workers(n_workers, n_items=n_tasks)
+    if resolved <= 1:
+        return {"n_workers": resolved, "use_mp": False, "reason": "single_worker"}
+    return {"n_workers": resolved, "use_mp": True, "reason": "process_pool_enabled"}
+
+
 def multiprocessing_context_from_env():
-    method = os.environ.get("WL_MP_START_METHOD", "").strip()
-    if not method:
-        return None
+    """Return a process start context that avoids POSIX fork deadlocks.
+
+    Linux/macOS default to fork, which can hang after importing HDF5,
+    OpenMP-backed NumPy/SciPy, or XGBoost. Spawn is slower to start but
+    much more reliable for these batch scripts. WL_MP_START_METHOD can
+    still override this for controlled experiments.
+    """
+    method = os.environ.get("WL_MP_START_METHOD", "").strip().lower() or "spawn"
     import multiprocessing as mp
     return mp.get_context(method)
 
@@ -887,7 +902,8 @@ def stability_selection(
                           np.asarray(va_idx, dtype=np.int64),
                           min(15, len(feature_cols))))
 
-    n_workers = resolve_n_workers(n_workers, n_items=len(tasks))
+    parallel_plan = resolve_stability_parallel_plan(n_workers, n_tasks=len(tasks))
+    n_workers = int(parallel_plan["n_workers"])
 
     data = {
         "X": X,
@@ -898,9 +914,9 @@ def stability_selection(
     }
 
     # 小数据集走单进程，跳过 pickle 序列化开销
-    use_mp = n_workers > 1 and len(tasks) > 4
+    use_mp = bool(parallel_plan["use_mp"])
     print(f"\n  稳定性选择: {n_folds_total} folds (seeds={len(seeds)} x splits={n_splits}), "
-          f"workers={'mp' if use_mp else 1}")
+          f"workers={n_workers}, use_mp={use_mp}, reason={parallel_plan['reason']}")
 
     fold_results = []
     if use_mp:
@@ -913,6 +929,7 @@ def stability_selection(
         mp_ctx = multiprocessing_context_from_env()
         if mp_ctx is not None:
             pool_kwargs["mp_context"] = mp_ctx
+        print(f"  stability process pool: workers={n_workers}, mp_start={mp_ctx.get_start_method()}", flush=True)
         with ProcessPoolExecutor(**pool_kwargs) as ex:
             futures = {ex.submit(_run_one_fold, t): i for i, t in enumerate(tasks)}
             done_count = 0

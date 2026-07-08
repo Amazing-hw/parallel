@@ -37,7 +37,7 @@ LEAKAGE_AND_META_COLUMNS = {
 }
 
 
-SELECTION_CACHE_VERSION = 1
+SELECTION_CACHE_VERSION = 2
 
 
 def resolve_feature_pool_path(artifact_dir, split):
@@ -116,12 +116,14 @@ def feature_selection_cache_params(
     stability_max_rows=5000,
     permutation_repeats=3,
     rank_only=False,
+    min_features=4,
 ):
     stability_seeds = parse_stability_seeds(stability_seeds if stability_seeds is not None else "1,7")
     return {
         "script": "parallel_s06_select_features",
         "version": SELECTION_CACHE_VERSION,
         "max_features": int(max_features),
+        "min_features": int(min_features),
         "missing_thresh": 0.5,
         "corr_thresh": 0.95,
         "preselect_top": int(preselect_top),
@@ -172,6 +174,25 @@ def load_feature_selection_cache(artifact_dir, input_paths, params):
         return None
     cache["selected_features"] = list(selected_payload.get("selected_features", []))
     return cache
+
+
+def ensure_minimum_selected_features(selected, ranked, min_features=4, max_features=12):
+    final = []
+    seen = set()
+    for feature in selected or []:
+        feature = str(feature)
+        if feature and feature not in seen:
+            final.append(feature)
+            seen.add(feature)
+    for item in ranked or []:
+        feature = str(item.get("feature", ""))
+        if not feature or feature in seen:
+            continue
+        final.append(feature)
+        seen.add(feature)
+        if len(final) >= int(min_features):
+            break
+    return final[:max(1, int(max_features))]
 
 
 def write_feature_selection_cache(artifact_dir, input_paths, params, selected_features):
@@ -238,6 +259,7 @@ def write_feature_review(artifact_dir, train_df, valid_df, ranked, selected_feat
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--artifact_dir", default="artifacts/parallel")
+    p.add_argument("--min_features", type=int, default=4)
     p.add_argument("--max_features", type=int, default=12)
     p.add_argument("--n_workers", type=int, default=None)
     p.add_argument("--preselect_top", type=int, default=4)
@@ -261,6 +283,7 @@ def main():
         stability_max_rows=args.stability_max_rows,
         permutation_repeats=args.permutation_repeats,
         rank_only=args.rank_only,
+        min_features=args.min_features,
     )
     cache = load_feature_selection_cache(args.artifact_dir, input_paths, cache_params)
     if cache is not None:
@@ -309,6 +332,9 @@ def main():
     sel = select_by_group_from_combined(stab, max_features=args.max_features, min_acc_features=1)
     feats = sel[0] if isinstance(sel, tuple) else sel
     feats = [f for f in feats if f != "commercial_score"]
+    feats = ensure_minimum_selected_features(
+        feats, stab, min_features=args.min_features, max_features=args.max_features
+    )
     write_feature_review(args.artifact_dir, dtc, dvc, stab, feats, args.max_features)
     print(f"Selected ({len(feats)}):")
     for i, feature in enumerate(feats, start=1):
