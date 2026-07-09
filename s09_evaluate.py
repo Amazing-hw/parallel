@@ -296,6 +296,17 @@ def apply_guard_decision(commercial_pred, veto_risks, guard_mode="shadow", veto_
     )["final_pred"]
 
 
+def resolve_guard_params_from_config(fcfg, min_veto_windows=None, min_veto_ratio=None):
+    vp = fcfg.get("veto_params", {}) if isinstance(fcfg, dict) else {}
+    resolved_windows = min_veto_windows
+    resolved_ratio = min_veto_ratio
+    if resolved_windows is None:
+        resolved_windows = int(vp.get("min_veto_windows", 2))
+    if resolved_ratio is None:
+        resolved_ratio = float(vp.get("min_veto_ratio", 0.4))
+    return int(resolved_windows), float(resolved_ratio)
+
+
 def _normal_window_mask(df):
     if "fallback" not in df.columns:
         return pd.Series(True, index=df.index)
@@ -387,20 +398,24 @@ def main():
     p = argparse.ArgumentParser(); p.add_argument("--artifact_dir", default="artifacts/parallel")
     p.add_argument("--splits_dir", default="artifacts"); p.add_argument("--split", default="test")
     p.add_argument("--guard_mode", default="shadow", choices=GUARD_MODES)
-    p.add_argument("--min_veto_windows", type=int, default=2)
-    p.add_argument("--min_veto_ratio", type=float, default=0.4)
+    p.add_argument("--min_veto_windows", type=int, default=None)
+    p.add_argument("--min_veto_ratio", type=float, default=None)
     args = p.parse_args()
     os.makedirs(args.artifact_dir, exist_ok=True)
     bundle = joblib.load(os.path.join(args.artifact_dir, "new_model_bundle.pkl"))
     with open(os.path.join(args.artifact_dir, "fusion_config.json")) as f: fcfg = json.load(f)
     strat = fcfg["chosen_strategy"]; vp = fcfg.get("veto_params", {})
+    min_veto_windows, min_veto_ratio = resolve_guard_params_from_config(
+        fcfg, args.min_veto_windows, args.min_veto_ratio
+    )
+    print(f"Using guard params: min_veto_windows={min_veto_windows}, min_veto_ratio={min_veto_ratio}")
     t0 = time.time(); results = []
     feature_path = resolve_feature_pool_path(args.artifact_dir, args.split)
     if os.path.exists(feature_path):
         print(f"Using cached features: {feature_path}")
         results = evaluate_cached_feature_rows(
             pd.read_csv(feature_path), bundle, fcfg, guard_mode=args.guard_mode,
-            min_veto_windows=args.min_veto_windows, min_veto_ratio=args.min_veto_ratio
+            min_veto_windows=min_veto_windows, min_veto_ratio=min_veto_ratio
         )
     else:
         splits = load_splits(args.splits_dir); samples = splits[args.split]
@@ -453,7 +468,7 @@ def main():
             risk_series = 1.0 - Pna if com_pred else [0.0]
             decision = make_guard_decision(
                 com_pred, risk_series, guard_mode=args.guard_mode, veto_threshold=1.0 - float(vp.get("p_n_low", 0.2)),
-                min_veto_windows=args.min_veto_windows, min_veto_ratio=args.min_veto_ratio
+                min_veto_windows=min_veto_windows, min_veto_ratio=min_veto_ratio
             )
             par_pred = decision["final_pred"]
             results.append({"sample_name": sn, "target": target, "commercial_pred": com_pred,
@@ -466,7 +481,7 @@ def main():
     print(f"Inference ({time.time()-t0:.1f}s)")
     write_evaluation_outputs(
         args.artifact_dir, args.split, strat, args.guard_mode,
-        args.min_veto_windows, args.min_veto_ratio, results
+        min_veto_windows, min_veto_ratio, results
     )
     print("Done")
 

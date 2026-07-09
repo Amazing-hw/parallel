@@ -643,7 +643,7 @@ artifacts/parallel/model_search_results.json
 
 ### `s08_fusion.py`
 
-生成融合配置。
+生成融合配置，并在 valid 集上搜索 veto 规则参数。
 
 当前策略：
 
@@ -657,11 +657,25 @@ strategy = veto
 - 新并联模型。
 - veto 融合策略。
 
+同时会搜索：
+
+```text
+p_n_low:          默认 0.05,0.10,0.15,0.20,0.25,0.30
+min_veto_windows: 默认 1,2,3
+min_veto_ratio:   默认 0.2,0.3,0.4,0.5
+```
+
+搜索目标不是单纯最大化准确率，而是优先降低 `target=0, pred=1`，也就是非佩戴被误判为佩戴的 FP；其次约束 `target=1, pred=0` 的 FN 增加；最后再比较 accuracy 和 F1。默认允许 `max_fn_increase=1`，可以通过 `--max_fn_increase` 调整。
+
 输出：
 
 ```text
 artifacts/parallel/fusion_config.json
+artifacts/parallel/fusion_search_results.csv
+artifacts/parallel/fusion_search_results.json
 ```
+
+`fusion_config.json` 会写入最终采用的 `p_n_low`、`min_veto_windows` 和 `min_veto_ratio`。后续 `S09` 如果没有显式传入 `--min_veto_windows` 或 `--min_veto_ratio`，会默认读取这里的搜索结果。
 
 ### `s09_evaluate.py`
 
@@ -708,8 +722,8 @@ artifacts/parallel/features_{split}.csv
 S05 提取商用输出和新增特征
 S06 选择特征，可通过 --n_workers、--rank_only、--permutation_repeats 加速，并可用 --min_features 设置最少保留特征数
 S07 小范围搜参并训练并联小模型
-S08 生成 fusion 配置
-S09 评估
+S08 在 valid 集搜索 fusion/veto 规则参数并生成 fusion 配置
+S09 评估，默认读取 S08 搜出的 veto 规则参数
 S11 可解释性报告，可选
 ```
 
@@ -923,12 +937,14 @@ risk_count >= min_veto_windows
 risk_ratio >= min_veto_ratio
 ```
 
-默认持续条件：
+默认持续条件来自 `S08` 在 valid 集上写入 `fusion_config.json` 的搜索结果：
 
 ```text
-min_veto_windows = 2
-min_veto_ratio = 0.4
+veto_params.min_veto_windows
+veto_params.min_veto_ratio
 ```
+
+如果旧版 `fusion_config.json` 没有这两个字段，`S09` 才会回退到 `min_veto_windows=2`、`min_veto_ratio=0.4`。如果命令行显式传入 `--min_veto_windows` 或 `--min_veto_ratio`，则命令行参数优先，用于离线敏感性分析。
 
 注意：`hard_veto` 不建议直接全量商用，应该只用于离线评估或严格灰度。
 
@@ -1007,7 +1023,18 @@ fallback
 
 ### `fusion_config.json`
 
-融合配置，记录当前采用的策略和阈值。
+融合配置，记录当前采用的策略、阈值和 valid 集搜索得到的 veto 规则参数。核心字段：
+
+- `chosen_strategy`：当前固定为 `veto`。
+- `veto_params.p_n_low`：新增模型概率低于该阈值时，认为该窗口有否决风险。
+- `veto_params.min_veto_windows`：一个样本内至少多少个风险窗口才允许 hard veto。
+- `veto_params.min_veto_ratio`：风险窗口占比至少达到多少才允许 hard veto。
+- `veto_search.best`：valid 集上选中的最优规则。
+- `veto_search.selection_objective`：搜索目标说明，优先降低非佩戴误判为佩戴。
+
+### `fusion_search_results.csv/json`
+
+`S08` 的规则参数搜索明细。每一行是一组候选参数，包含该参数在 valid 集上的混淆矩阵、FP 减少数量、FN 增加数量和综合分数。用于解释为什么最终选择某组 veto 参数。
 
 ### `evaluation_report.json`
 

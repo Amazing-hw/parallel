@@ -106,23 +106,61 @@ def predict_guard_probability(feature_dict, package_dir="."):
     return float(booster.predict(xgb.DMatrix(x))[0])
 
 
-def apply_guard(commercial_pred, feature_dict, package_dir=".", guard_mode=None):
+def apply_guard_from_window_probabilities(commercial_pred, new_probabilities, package_dir=".", guard_mode=None):
     method = load_method(package_dir)
     guard_mode = guard_mode or method["guard"]["default_mode"]
-    p_new = predict_guard_probability(feature_dict, package_dir)
     commercial_pred = int(commercial_pred)
 
-    if method["project_type"] == "parallel":
-        veto = method["parallel"]["veto_params"]
-        risk = 1.0 - p_new
-        should_veto = commercial_pred == 1 and risk >= (1.0 - float(veto["p_n_low"]))
-        if guard_mode in ("bypass", "shadow", "soft_guard") or not should_veto:
-            return {"final_pred": commercial_pred, "new_probability": p_new, "guard_action": "record" if should_veto else "pass"}
-        if guard_mode == "hard_veto":
-            return {"final_pred": 0, "new_probability": p_new, "guard_action": "hard_veto"}
-        return {"final_pred": commercial_pred, "new_probability": p_new, "guard_action": "pass"}
+    if method["project_type"] != "parallel":
+        raise ValueError(f"unsupported project_type for this package: {method['project_type']}")
 
-    raise ValueError(f"unsupported project_type for this package: {method['project_type']}")
+    veto = method["parallel"]["veto_params"]
+    p_n_low = float(veto["p_n_low"])
+    min_veto_windows = int(veto.get("min_veto_windows", 2))
+    min_veto_ratio = float(veto.get("min_veto_ratio", 0.4))
+    probs = np.asarray(new_probabilities, dtype=float).reshape(-1)
+    probs = probs[np.isfinite(probs)]
+    if probs.size == 0:
+        probs = np.asarray([1.0], dtype=float)
+    risks = 1.0 - probs
+    high = risks >= (1.0 - p_n_low)
+    risk_count = int(np.sum(high))
+    risk_ratio = float(np.mean(high))
+    should_veto = (
+        commercial_pred == 1
+        and risk_count >= min_veto_windows
+        and risk_ratio >= min_veto_ratio
+    )
+
+    if guard_mode in ("bypass", "shadow", "soft_guard") or not should_veto:
+        return {
+            "final_pred": commercial_pred,
+            "new_probability": float(np.mean(probs)),
+            "guard_action": "record" if should_veto else "pass",
+            "risk_count": risk_count,
+            "risk_ratio": risk_ratio,
+        }
+    if guard_mode == "hard_veto":
+        return {
+            "final_pred": 0,
+            "new_probability": float(np.mean(probs)),
+            "guard_action": "hard_veto",
+            "risk_count": risk_count,
+            "risk_ratio": risk_ratio,
+        }
+    return {
+        "final_pred": commercial_pred,
+        "new_probability": float(np.mean(probs)),
+        "guard_action": "pass",
+        "risk_count": risk_count,
+        "risk_ratio": risk_ratio,
+    }
+
+
+def apply_guard(commercial_pred, feature_dict, package_dir=".", guard_mode=None):
+    method = load_method(package_dir)
+    p_new = predict_guard_probability(feature_dict, package_dir)
+    return apply_guard_from_window_probabilities(commercial_pred, [p_new], package_dir, guard_mode)
 '''
 
 
@@ -148,8 +186,9 @@ def readme_text():
 
 1. 商用模型仍然保留，并联模型只提供独立风险复核信号。
 2. 默认 `shadow` 不改变最终输出，只记录风险和分歧。
-3. `fusion_config.json` 的核心内容已经写入 `method.json` 的 `parallel` 字段。
-4. 真正上线前应由端侧工程按 `method.json` 重写为目标语言实现，并用本目录文件做一致性核对。
+3. `fusion_config.json` 的核心内容已经写入 `method.json` 的 `parallel` 字段，包括 `p_n_low`、`min_veto_windows`、`min_veto_ratio`。
+4. 样本级部署时建议参考 `deploy_inference.py` 的 `apply_guard_from_window_probabilities()`，对同一样本的多个窗口概率一起判断持续性风险。
+5. 真正上线前应由端侧工程按 `method.json` 重写为目标语言实现，并用本目录文件做一致性核对。
 """
 
 

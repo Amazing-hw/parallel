@@ -160,8 +160,12 @@ def main():
     p.add_argument("--max_depth", type=int, default=2)
     p.add_argument("--strategy", default="veto", choices=["veto"])
     p.add_argument("--guard_mode", default="shadow", choices=["bypass", "shadow", "soft_guard", "hard_veto"])
-    p.add_argument("--min_veto_windows", type=int, default=2)
-    p.add_argument("--min_veto_ratio", type=float, default=0.4)
+    p.add_argument("--min_veto_windows", type=int, default=None)
+    p.add_argument("--min_veto_ratio", type=float, default=None)
+    p.add_argument("--search_p_n_lows", default="0.05,0.10,0.15,0.20,0.25,0.30")
+    p.add_argument("--search_min_veto_windows", default="1,2,3")
+    p.add_argument("--search_min_veto_ratios", default="0.2,0.3,0.4,0.5")
+    p.add_argument("--max_fn_increase", type=int, default=1)
     p.add_argument("--manual_features", default=None)
     p.add_argument("--explain", action="store_true")
     p.add_argument("--feature_report", action="store_true",
@@ -215,15 +219,27 @@ def main():
         train_args += ["--n_jobs", str(args.n_workers)]
     if args.manual_features:
         train_args += ["--manual_features", _abs_path(args.manual_features, d)]
+    fusion_args = [
+        "--artifact_dir", paths["artifact_dir"], "--strategy", args.strategy,
+        "--search_p_n_lows", args.search_p_n_lows,
+        "--search_min_veto_windows", args.search_min_veto_windows,
+        "--search_min_veto_ratios", args.search_min_veto_ratios,
+        "--max_fn_increase", str(args.max_fn_increase),
+    ]
+    evaluate_args = [
+        "--artifact_dir", paths["artifact_dir"], "--splits_dir", paths["splits_dir"], "--split", args.eval_split,
+        "--guard_mode", args.guard_mode,
+    ]
+    if args.min_veto_windows is not None:
+        evaluate_args += ["--min_veto_windows", str(args.min_veto_windows)]
+    if args.min_veto_ratio is not None:
+        evaluate_args += ["--min_veto_ratio", str(args.min_veto_ratio)]
     steps = [
         ("S05-Extract", os.path.join(d, "s05_extract_features.py"), extract_args),
         ("S06-Select", os.path.join(d, "s06_select_features.py"), select_args),
         ("S07-Train", os.path.join(d, "s07_train_model.py"), train_args),
-        ("S08-Fusion", os.path.join(d, "s08_fusion.py"), ["--artifact_dir", paths["artifact_dir"], "--strategy", args.strategy]),
-        ("S09-Evaluate", os.path.join(d, "s09_evaluate.py"),
-         ["--artifact_dir", paths["artifact_dir"], "--splits_dir", paths["splits_dir"], "--split", args.eval_split,
-          "--guard_mode", args.guard_mode, "--min_veto_windows", str(args.min_veto_windows),
-          "--min_veto_ratio", str(args.min_veto_ratio)]),
+        ("S08-Fusion", os.path.join(d, "s08_fusion.py"), fusion_args),
+        ("S09-Evaluate", os.path.join(d, "s09_evaluate.py"), evaluate_args),
     ]
     if args.explain:
         steps.append(("S11-Explain", os.path.join(d, "s11_explain.py"), [
