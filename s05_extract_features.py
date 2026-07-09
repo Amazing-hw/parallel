@@ -23,6 +23,15 @@ from s04_data import load_splits, multiprocessing_context_from_env, resolve_n_wo
 MIN_AUTO_PARALLEL_SAMPLES = 32
 MIN_CHUNKED_MAP_SAMPLES = 200
 _THREADPOOL_LIMITER = None
+FEATURE_RESULT_COLUMNS = [
+    "sample_name",
+    "target",
+    "window_idx",
+    "commercial_score",
+    "commercial_pred",
+    "fallback",
+    "fallback_reason",
+]
 
 
 def _format_duration(seconds):
@@ -104,6 +113,8 @@ def _use_chunked_map(total, n_workers):
 
 def write_feature_outputs(artifact_dir, split_name, df):
     """Write legacy and standard feature-pool names for the same cached rows."""
+    if df.empty and len(df.columns) == 0:
+        df = pd.DataFrame(columns=FEATURE_RESULT_COLUMNS)
     df.to_csv(os.path.join(artifact_dir, f"features_{split_name}.csv"), index=False)
     df.to_csv(os.path.join(artifact_dir, f"feature_pool_{split_name}.csv"), index=False)
 

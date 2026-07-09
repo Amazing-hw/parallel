@@ -8,6 +8,7 @@ Output: {artifact_dir}/fusion_config.json
 import argparse
 import json
 import os
+import sys
 
 import joblib
 import numpy as np
@@ -233,6 +234,12 @@ def main():
     df = pd.read_csv(vp)
     if "fallback" in df.columns:
         df = df[df["fallback"] == 0]
+    if df.empty:
+        print(
+            f"ERROR: {vp} has no non-fallback validation rows. "
+            "Run S05 on valid H5 data, or inspect feature_pool_valid.csv and fallback_reason."
+        )
+        sys.exit(1)
 
     search_df = df.copy()
     search_df["P_c"] = search_df["commercial_score"].apply(score_to_prob)

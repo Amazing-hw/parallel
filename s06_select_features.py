@@ -296,6 +296,12 @@ def main():
     t0 = time.time()
     dt = pd.read_csv(tp)
     dv = pd.read_csv(vp) if os.path.exists(vp) else dt.copy()
+    if dt.empty:
+        print(
+            f"ERROR: {tp} has no valid feature rows. "
+            "Run S05 on a dataset with extractable windows, or inspect features_train.csv for fallback-only/empty output."
+        )
+        sys.exit(1)
     fcols = get_candidate_feature_cols(dt)
     dtc, dvc, kept, _, _ = clean_features_by_train(dt, dv, fcols, missing_thresh=0.5, corr_thresh=0.95, skip_vif=True)
     stability_df = limit_rows_for_stability(dtc, max_rows=args.stability_max_rows)

@@ -309,6 +309,12 @@ def main():
     dt = pd.read_csv(tp); dv = pd.read_csv(vp) if os.path.exists(vp) else dt.copy()
     if "fallback" in dt.columns: dt = dt[dt["fallback"] == 0]
     if "fallback" in dv.columns: dv = dv[dv["fallback"] == 0]
+    if dt.empty:
+        print(
+            f"ERROR: {tp} has no non-fallback training rows. "
+            "Run S05 on valid H5 data, or inspect feature_pool_train.csv and fallback_reason."
+        )
+        sys.exit(1)
     np_, nn_ = int(dt["target"].sum()), len(dt) - int(dt["target"].sum())
     sw = max(0.5, nn_ / max(1, np_)) if np_ > 0 else 1.0
     Xt, yt, fills = prepare(dt, feats); Xv, yv, _ = prepare(dv, feats); t0 = time.time()
